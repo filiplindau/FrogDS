@@ -11,6 +11,7 @@ import Queue
 from concurrent.futures import Future
 from twisted.internet import reactor, defer
 from twisted.internet.protocol import Protocol, ClientFactory, Factory
+from twisted.python.failure import Failure
 import PyTango as tango
 import PyTango.futures as tangof
 
@@ -68,6 +69,7 @@ class TangoAttributeProtocol(Protocol):
 
     def connectionLost(self, reason):
         logger.debug("Connection lost, reason {0}".format(reason))
+        return reason
 
 
 class TangoAttributeFactory(Factory):
@@ -79,13 +81,14 @@ class TangoAttributeFactory(Factory):
         self.connected = False
         self.d = None
         self.proto_list = list()
+        self.attribute_dict = dict()
 
     def startFactory(self):
         logger.debug("Starting TangoAttributeFactory")
         self.d = deferred_from_future(tangof.DeviceProxy(self.device_name, wait=False))
         self.d.addCallbacks(self.connection_success, self.connection_fail)
 
-    def buildProtocol(self, operation, name, data, d=None):
+    def buildProtocol(self, operation, name, data=None, d=None):
         """
         Create a TangoAttributeProtocol that sends a Tango operation to the factory deviceproxy.
 
@@ -101,7 +104,7 @@ class TangoAttributeFactory(Factory):
             proto.factory = self
             self.proto_list.append(proto)
             df = proto.makeConnection()
-            df.addCallbacks(self.data_received, self.connection_fail)
+            df.addCallbacks(self.data_received, self.protocol_fail)
             if d is not None:
                 df.addCallback(d)
         else:
@@ -136,10 +139,27 @@ class TangoAttributeFactory(Factory):
         logger.error("Failed to connect to device. {0}".format(err))
         self.device = None
         self.connected = False
+        fail = Failure(err)
+        return err
+
+    def protocol_fail(self, err):
+        logger.error("Failed to do attribute operation on device {0}: {1}".format(self.device_name, err))
+        fail = Failure(err)
+        return fail
 
     def data_received(self, result):
         logger.debug("Data received: {0}".format(result))
+        self.attribute_dict[result.name] = result
         return result
+
+    def get_attribute(self, name):
+        if name in self.attribute_dict:
+            d = defer.Deferred()
+            d.callback(self.attribute_dict[name])
+        else:
+            logger.debug("Attribute not in dictionary, retrieve it from device")
+            d = self.buildProtocol("read", name)
+        return d
 
 
 class TangoAttributeReader(object):
@@ -151,11 +171,42 @@ class TangoAttributeReader(object):
 
 
 class FrogController(object):
-    def __init__(self):
-        pass
+    def __init__(self, spectrometer_name, motor_name):
+        self.device_names = dict()
+        self.device_names["spectrometer"] = spectrometer_name
+        self.device_names["motor"] = motor_name
 
+        self.device_factories = dict()
+        self.device_factories["spectrometer"] = TangoAttributeFactory(spectrometer_name)
+        self.device_factories["motor"] = TangoAttributeFactory(motor_name)
+
+        for dev_fact in self.device_factories:
+            self.device_factories[dev_fact].doStart()
+
+    def read_attribute(self, name, device_name):
+        logger.debug("Read attribute \"{0}\" from \"{1}\"".format(name, device_name))
+        if device_name in self.device_names:
+            factory = self.device_factories[device_name]
+            d = factory.buildProtocol("read", name)
+        else:
+            logging.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
+            err = tango.DevError(reason="Device {0} not used".format(device_name),
+                                 severety=tango.ErrSeverity.ERR,
+                                 desc="The device is not in the list of devices used by this controller",
+                                 origin="read_attribute")
+            d = Failure(tango.DevFailed(err))
+        return d
+
+
+def test_cb(result):
+    logger.debug("Returned {0}".format(result))
+
+
+def test_err(err):
+    logger.error("ERROR Returned {0}".format(err))
 
 if __name__ == "__main__":
-    taf = TangoAttributeFactory("sys/tg_test/1")
-    taf.doStart()
-    taf.buildProtocol("read", "state")
+    fc = FrogController("sys/tg_test/1", "sys/tg_test/1")
+    time.sleep(0)
+    d = fc.read_attribute("double_scalarrr", "motor")
+    d.addCallbacks(test_cb, test_err)
