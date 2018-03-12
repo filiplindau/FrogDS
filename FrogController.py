@@ -20,7 +20,8 @@ logger = logging.getLogger("FrogController")
 while len(logger.handlers):
     logger.removeHandler(logger.handlers[0])
 
-f = logging.Formatter("%(asctime)s - %(module)s.   %(funcName)s - %(levelname)s - %(message)s")
+# f = logging.Formatter("%(asctime)s - %(module)s.   %(funcName)s - %(levelname)s - %(message)s")
+f = logging.Formatter("%(asctime)s - %(name)s.   %(funcName)s - %(levelname)s - %(message)s")
 fh = logging.StreamHandler()
 fh.setFormatter(f)
 logger.addHandler(fh)
@@ -51,8 +52,11 @@ class TangoAttributeProtocol(Protocol):
         self.d = None
         self.factory = None
 
+        self.logger = logging.getLogger("FrogController.Protocol_{0}_{1}".format(operation.upper(), name))
+        self.logger.setLevel(logging.DEBUG)
+
     def makeConnection(self, transport=None):
-        logger.debug("Protocol {0} make connection".format(self.name))
+        self.logger.debug("Protocol {0} make connection".format(self.name))
         if self.operation == "read":
             self.d = deferred_from_future(self.factory.device.read_attribute(self.name, wait=False))
         elif self.operation == "write":
@@ -64,11 +68,11 @@ class TangoAttributeProtocol(Protocol):
 
     def dataReceived(self, data):
         self.result_data = data
-        logger.debug("Received data {0}".format(data))
+        self.logger.debug("Received data {0}".format(data))
         return data
 
     def connectionLost(self, reason):
-        logger.debug("Connection lost, reason {0}".format(reason))
+        self.logger.debug("Connection lost, reason {0}".format(reason))
         return reason
 
 
@@ -83,8 +87,11 @@ class TangoAttributeFactory(Factory):
         self.proto_list = list()
         self.attribute_dict = dict()
 
+        self.logger = logging.getLogger("FrogController.Factory_{0}".format(device_name))
+        self.logger.setLevel(logging.CRITICAL)
+
     def startFactory(self):
-        logger.debug("Starting TangoAttributeFactory")
+        self.logger.info("Starting TangoAttributeFactory")
         self.d = deferred_from_future(tangof.DeviceProxy(self.device_name, wait=False))
         self.d.addCallbacks(self.connection_success, self.connection_fail)
 
@@ -99,7 +106,7 @@ class TangoAttributeFactory(Factory):
         :return: Deferred that fires when the Tango operation is completed.
         """
         if self.connected is True:
-            logger.debug("Connected, create protocol and makeConnection")
+            self.logger.info("Connected, create protocol and makeConnection")
             proto = self.protocol(operation, name, data)
             proto.factory = self
             self.proto_list.append(proto)
@@ -108,13 +115,14 @@ class TangoAttributeFactory(Factory):
             if d is not None:
                 df.addCallback(d)
         else:
-            logger.debug("Not connected yet, adding to connect callback")
-            df = defer.Deferred()
-            self.d.addCallback(self.build_protocol_cb, operation, name, data, df)
+            self.logger.debug("Not connected yet, adding to connect callback")
+            # df = defer.Deferred()
+            self.d.addCallbacks(self.build_protocol_cb, self.connection_fail, callbackArgs=[operation, name, data])
+            df = self.d
 
         return df
 
-    def build_protocol_cb(self, result, operation, name, data, df):
+    def build_protocol_cb(self, result, operation, name, data, df=None):
         """
         We need this extra callback for buildProtocol since the first argument
         is always the callback result.
@@ -126,30 +134,33 @@ class TangoAttributeFactory(Factory):
         :param df: Optional deferred to add the result of the Tango operation to
         :return: Deferred that fires when the Tango operation is completed.
         """
-        logger.debug("Now call build protocol")
+        self.logger.debug("Now call build protocol")
         d = self.buildProtocol(operation, name, data, df)
         return d
 
     def connection_success(self, result):
-        logger.debug("Connected to deviceproxy")
+        self.logger.debug("Connected to deviceproxy")
         self.connected = True
         self.device = result
 
     def connection_fail(self, err):
-        logger.error("Failed to connect to device. {0}".format(err))
+        self.logger.error("Failed to connect to device. {0}".format(err))
         self.device = None
         self.connected = False
         fail = Failure(err)
         return err
 
     def protocol_fail(self, err):
-        logger.error("Failed to do attribute operation on device {0}: {1}".format(self.device_name, err))
+        self.logger.error("Failed to do attribute operation on device {0}: {1}".format(self.device_name, err))
         fail = Failure(err)
         return fail
 
     def data_received(self, result):
-        logger.debug("Data received: {0}".format(result))
-        self.attribute_dict[result.name] = result
+        self.logger.debug("Data received: {0}".format(result))
+        try:
+            self.attribute_dict[result.name] = result
+        except AttributeError:
+            pass
         return result
 
     def get_attribute(self, name):
@@ -157,7 +168,7 @@ class TangoAttributeFactory(Factory):
             d = defer.Deferred()
             d.callback(self.attribute_dict[name])
         else:
-            logger.debug("Attribute not in dictionary, retrieve it from device")
+            self.logger.debug("Attribute not in dictionary, retrieve it from device")
             d = self.buildProtocol("read", name)
         return d
 
@@ -172,6 +183,13 @@ class TangoAttributeReader(object):
 
 class FrogController(object):
     def __init__(self, spectrometer_name, motor_name):
+        """
+        Controller for running a scanning Frog device. Communicates with a spectrometer and a motor.
+
+
+        :param spectrometer_name:
+        :param motor_name:
+        """
         self.device_names = dict()
         self.device_names["spectrometer"] = spectrometer_name
         self.device_names["motor"] = motor_name
@@ -180,22 +198,174 @@ class FrogController(object):
         self.device_factories["spectrometer"] = TangoAttributeFactory(spectrometer_name)
         self.device_factories["motor"] = TangoAttributeFactory(motor_name)
 
+        self.logger = logging.getLogger("FrogController.Controller")
+        self.logger.setLevel(logging.DEBUG)
+
         for dev_fact in self.device_factories:
             self.device_factories[dev_fact].doStart()
 
     def read_attribute(self, name, device_name):
-        logger.debug("Read attribute \"{0}\" from \"{1}\"".format(name, device_name))
+        self.logger.info("Read attribute \"{0}\" on \"{1}\"".format(name, device_name))
         if device_name in self.device_names:
             factory = self.device_factories[device_name]
             d = factory.buildProtocol("read", name)
         else:
-            logging.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
+            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
             err = tango.DevError(reason="Device {0} not used".format(device_name),
                                  severety=tango.ErrSeverity.ERR,
                                  desc="The device is not in the list of devices used by this controller",
                                  origin="read_attribute")
             d = Failure(tango.DevFailed(err))
         return d
+
+    def write_attribute(self, name, device_name, data):
+        self.logger.info("Write attribute \"{0}\" on \"{1}\"".format(name, device_name))
+        if device_name in self.device_names:
+            factory = self.device_factories[device_name]
+            d = factory.buildProtocol("write", name, data)
+        else:
+            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
+            err = tango.DevError(reason="Device {0} not used".format(device_name),
+                                 severety=tango.ErrSeverity.ERR,
+                                 desc="The device is not in the list of devices used by this controller",
+                                 origin="write_attribute")
+            d = Failure(tango.DevFailed(err))
+        return d
+
+    def defer_later(self, delay, delayed_callable, *a, **kw):
+        self.logger.info("Calling {0} in {1} seconds".format(delayed_callable, delay))
+
+        def defer_later_cancel(deferred):
+            delayed_call.cancel()
+
+        d = defer.Deferred(defer_later_cancel)
+        d.addCallback(lambda ignored: delayed_callable(*a, **kw))
+        delayed_call = threading.Timer(delay, d.callback, [None])
+        delayed_call.start()
+        return d
+
+
+class LoopingCall(object):
+    def __init__(self, loop_callable, *args, **kw):
+        self.f = loop_callable
+        self.args = args
+        self.kw = kw
+        self.running = False
+        self.interval = 0.0
+        self.starttime = None
+        self._deferred = None
+        self._runAtStart = False
+        self.call = None
+
+    def start(self, interval, now=True):
+        """
+        Start running function every interval seconds.
+        @param interval: The number of seconds between calls.  May be
+        less than one.  Precision will depend on the underlying
+        platform, the available hardware, and the load on the system.
+        @param now: If True, run this call right now.  Otherwise, wait
+        until the interval has elapsed before beginning.
+        @return: A Deferred whose callback will be invoked with
+        C{self} when C{self.stop} is called, or whose errback will be
+        invoked when the function raises an exception or returned a
+        deferred that has its errback invoked.
+        """
+        if self.running is True:
+            self.stop()
+
+        if interval < 0:
+            raise ValueError("interval must be >= 0")
+        self.running = True
+        # Loop might fail to start and then self._deferred will be cleared.
+        # This why the local C{deferred} variable is used.
+        deferred = self._deferred = defer.Deferred()
+        self.starttime = time.time()
+        self.interval = interval
+        self._runAtStart = now
+        if now:
+            self()
+        else:
+            self._schedule_from(self.starttime)
+        return deferred
+
+    def stop(self):
+        """Stop running function.
+        """
+        assert self.running, ("Tried to stop a LoopingCall that was "
+                              "not running.")
+        self.running = False
+        if self.call is not None:
+            self.call.cancel()
+            self.call = None
+            d, self._deferred = self._deferred, None
+            d.callback(self)
+
+    def reset(self):
+        """
+        Skip the next iteration and reset the timer.
+        @since: 11.1
+        """
+        assert self.running, ("Tried to reset a LoopingCall that was "
+                              "not running.")
+        if self.call is not None:
+            self.call.cancel()
+            self.call = None
+            self.starttime = time.time()
+            self._schedule_from(self.starttime)
+
+    def __call__(self):
+        def cb(result):
+            if self.running:
+                self._schedule_from(time.time())
+            else:
+                d, self._deferred = self._deferred, None
+                d.callback(self)
+
+        def eb(failure):
+            self.running = False
+            d, self._deferred = self._deferred, None
+            d.errback(failure)
+
+        self.call = None
+        d = defer.maybeDeferred(self.f, *self.args, **self.kw)
+        d.addCallback(cb)
+        d.addErrback(eb)
+
+    def _schedule_from(self, when):
+        """
+        Schedule the next iteration of this looping call.
+        @param when: The present time from whence the call is scheduled.
+        """
+
+        def how_long():
+            # How long should it take until the next invocation of our
+            # callable?  Split out into a function because there are multiple
+            # places we want to 'return' out of this.
+            if self.interval == 0:
+                # If the interval is 0, just go as fast as possible, always
+                # return zero, call ourselves ASAP.
+                return 0
+            # Compute the time until the next interval; how long has this call
+            # been running for?
+            running_for = when - self.starttime
+            # And based on that start time, when does the current interval end?
+            until_next_interval = self.interval - (running_for % self.interval)
+            # Now that we know how long it would be, we have to tell if the
+            # number is effectively zero.  However, we can't just test against
+            # zero.  If a number with a small exponent is added to a number
+            # with a large exponent, it may be so small that the digits just
+            # fall off the end, which means that adding the increment makes no
+            # difference; it's time to tick over into the next interval.
+            if when == when + until_next_interval:
+                # If it's effectively zero, then we need to add another
+                # interval.
+                return self.interval
+            # Finally, if everything else is normal, we just return the
+            # computed delay.
+            return until_next_interval
+
+        self.call = threading.Timer(how_long(), self)
+        self.call.start()
 
 
 def test_cb(result):
@@ -205,8 +375,15 @@ def test_cb(result):
 def test_err(err):
     logger.error("ERROR Returned {0}".format(err))
 
+
 if __name__ == "__main__":
     fc = FrogController("sys/tg_test/1", "sys/tg_test/1")
     time.sleep(0)
-    d = fc.read_attribute("double_scalarrr", "motor")
-    d.addCallbacks(test_cb, test_err)
+    da = fc.read_attribute("double_scalar", "motor")
+    da.addCallbacks(test_cb, test_err)
+    da = fc.write_attribute("double_scalar_w", "motor", 10)
+    da.addCallbacks(test_cb, test_err)
+
+    da = fc.defer_later(3.0, fc.read_attribute, "short_scalar", "motor")
+    da.addCallback(test_cb, test_err)
+
