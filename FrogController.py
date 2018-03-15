@@ -7,11 +7,12 @@ Created on Feb 27, 2018
 import threading
 import time
 import logging
+import traceback
 import Queue
 from concurrent.futures import Future
-from twisted.internet import reactor, defer
+from twisted.internet import reactor, defer, error
 from twisted.internet.protocol import Protocol, ClientFactory, Factory
-from twisted.python.failure import Failure
+from twisted.python.failure import Failure, reflect
 import PyTango as tango
 import PyTango.futures as tangof
 
@@ -53,7 +54,7 @@ class TangoAttributeProtocol(Protocol):
         self.factory = None
 
         self.logger = logging.getLogger("FrogController.Protocol_{0}_{1}".format(operation.upper(), name))
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.WARNING)
 
     def makeConnection(self, transport=None):
         self.logger.debug("Protocol {0} make connection".format(self.name))
@@ -257,6 +258,11 @@ class LoopingCall(object):
         self._runAtStart = False
         self.call = None
 
+        self.loop_deferred = defer.Deferred()
+
+        self.logger = logging.getLogger("FrogController.LoopingCall")
+        self.logger.setLevel(logging.DEBUG)
+
     def start(self, interval, now=True):
         """
         Start running function every interval seconds.
@@ -273,6 +279,7 @@ class LoopingCall(object):
         if self.running is True:
             self.stop()
 
+        self.logger.debug("Starting looping call")
         if interval < 0:
             raise ValueError("interval must be >= 0")
         self.running = True
@@ -317,6 +324,11 @@ class LoopingCall(object):
         def cb(result):
             if self.running:
                 self._schedule_from(time.time())
+                new_loop_deferred = defer.Deferred()
+                for callback in self.loop_deferred.callbacks:
+                    new_loop_deferred.callbacks.append(callback)
+                self.loop_deferred.callback(result)
+                self.loop_deferred = new_loop_deferred
             else:
                 d, self._deferred = self._deferred, None
                 d.callback(self)
@@ -327,6 +339,7 @@ class LoopingCall(object):
             d.errback(failure)
 
         self.call = None
+        self.logger.debug("Calling function")
         d = defer.maybeDeferred(self.f, *self.args, **self.kw)
         d.addCallback(cb)
         d.addErrback(eb)
@@ -368,12 +381,393 @@ class LoopingCall(object):
         self.call.start()
 
 
+class DeferredCondition(object):
+    def __init__(self, condition, cond_callable, *args, **kw):
+        if "result" in condition:
+            self.condition = condition
+        else:
+            self.condition = "result " + condition
+        self.cond_callable = cond_callable
+        self.args = args
+        self.kw = kw
+        self.logger = logging.getLogger("FrogController.DeferredCondition")
+        self.logger.setLevel(logging.WARNING)
+
+        self.running = False
+        self.call_timer = None
+        self._deferred = None
+        self.starttime = None
+        self.interval = None
+        self.clock = None
+
+    def start(self, interval, timeout=None):
+        if self.running is True:
+            self.stop()
+
+        self.logger.debug("Starting checking condition {0}".format(self.condition))
+        if interval < 0:
+            raise ValueError("interval must be >= 0")
+        self.running = True
+        # Loop might fail to start and then self._deferred will be cleared.
+        # This why the local C{deferred} variable is used.
+        deferred = self._deferred = defer.Deferred()
+        if timeout is not None:
+            self.clock = ClockReactorless()
+            deferred.addTimeout(timeout, self.clock)
+            deferred.addErrback(self.cond_error)
+        self.starttime = time.time()
+        self.interval = interval
+        self._run_callable()
+        return deferred
+
+    def stop(self):
+        """Stop running function.
+        """
+        assert self.running, ("Tried to stop a LoopingCall that was "
+                              "not running.")
+        self.running = False
+        if self.call_timer is not None:
+            self.call_timer.cancel()
+            self.call_timer = None
+            d, self._deferred = self._deferred, None
+            d.callback(None)
+
+    def _run_callable(self):
+        self.logger.debug("Calling {0}".format(self.cond_callable))
+        d = defer.maybeDeferred(self.cond_callable, *self.args, **self.kw)
+        d.addCallbacks(self.check_condition, self.cond_error)
+
+    def _schedule_from(self, when):
+        """
+        Schedule the next iteration of this looping call.
+        @param when: The present time from whence the call is scheduled.
+        """
+        t = 0
+        if self.interval > 0:
+            # Compute the time until the next interval; how long has this call
+            # been running for?
+            running_for = when - self.starttime
+            # And based on that start time, when does the current interval end?
+            until_next_interval = self.interval - (running_for % self.interval)
+            # Now that we know how long it would be, we have to tell if the
+            # number is effectively zero.  However, we can't just test against
+            # zero.  If a number with a small exponent is added to a number
+            # with a large exponent, it may be so small that the digits just
+            # fall off the end, which means that adding the increment makes no
+            # difference; it's time to tick over into the next interval.
+            if when == when + until_next_interval:
+                # If it's effectively zero, then we need to add another
+                # interval.
+                t = self.interval
+            # Finally, if everything else is normal, we just return the
+            # computed delay.
+            else:
+                t = until_next_interval
+        self.logger.debug("Scheduling new function call in {0} s".format(t))
+        self.call = threading.Timer(t, self._run_callable)
+        self.call.start()
+
+    def check_condition(self, result):
+        self.logger.debug("Checking condition {0} with result {1}".format(self.condition, result))
+        if self.running is True:
+            cond = eval(self.condition)
+            self.logger.debug("Condition evaluated {0}".format(cond))
+            if cond is True:
+                d, self._deferred = self._deferred, None
+                d.callback(result)
+            else:
+                self._schedule_from(time.time())
+            return result
+        else:
+            return False
+
+    def cond_error(self, err):
+        self.logger.error("Condition function returned error {0}".format(err))
+        self.running = False
+        if self.call_timer is not None:
+            self.call_timer.cancel()
+            self.call_timer = None
+        d, self._deferred = self._deferred, None
+        d.errback(err)
+        return err
+
+
+class DelayedCallReactorless(object):
+    # enable .debug to record creator call stack, and it will be logged if
+    # an exception occurs while the function is being run
+    debug = False
+    _str = None
+
+    def __init__(self, time, func, args, kw, cancel, reset,
+                 seconds=time.time):
+        """
+        @param time: Seconds from the epoch at which to call C{func}.
+        @param func: The callable to call.
+        @param args: The positional arguments to pass to the callable.
+        @param kw: The keyword arguments to pass to the callable.
+        @param cancel: A callable which will be called with this
+            DelayedCall before cancellation.
+        @param reset: A callable which will be called with this
+            DelayedCall after changing this DelayedCall's scheduled
+            execution time. The callable should adjust any necessary
+            scheduling details to ensure this DelayedCall is invoked
+            at the new appropriate time.
+        @param seconds: If provided, a no-argument callable which will be
+            used to determine the current time any time that information is
+            needed.
+        """
+        self.time, self.func, self.args, self.kw = time, func, args, kw
+        self.resetter = reset
+        self.canceller = cancel
+        self.seconds = seconds
+        self.cancelled = self.called = 0
+        self.delayed_time = 0
+        self.timer = None
+        if self.debug:
+            self.creator = traceback.format_stack()[:-2]
+        self._schedule_call()
+
+    def getTime(self):
+        """Return the time at which this call will fire
+        @rtype: C{float}
+        @return: The number of seconds after the epoch at which this call is
+        scheduled to be made.
+        """
+        return self.time + self.delayed_time
+
+    def _schedule_call(self):
+        if self.timer is not None:
+            if self.timer.is_alive() is True:
+                self.timer.cancel()
+        self.timer = threading.Timer(self.time + self.delayed_time - time.time(), self._fire_call)
+        self.timer.start()
+
+    def _fire_call(self):
+        self.called = True
+        self.func(*self.args, **self.kw)
+
+    def cancel(self):
+        """Unschedule this call
+        @raise AlreadyCancelled: Raised if this call has already been
+        unscheduled.
+        @raise AlreadyCalled: Raised if this call has already been made.
+        """
+        if self.cancelled:
+            raise error.AlreadyCancelled
+        elif self.called:
+            raise error.AlreadyCalled
+        else:
+            if self.timer is not None:
+                if self.timer.is_alive() is True:
+                    self.timer.cancel()
+            self.canceller(self)
+            self.cancelled = 1
+            if self.debug:
+                self._str = str(self)
+            del self.func, self.args, self.kw
+
+    def reset(self, secondsFromNow):
+        """Reschedule this call for a different time
+        @type secondsFromNow: C{float}
+        @param secondsFromNow: The number of seconds from the time of the
+        C{reset} call at which this call will be scheduled.
+        @raise AlreadyCancelled: Raised if this call has been cancelled.
+        @raise AlreadyCalled: Raised if this call has already been made.
+        """
+        if self.cancelled:
+            raise error.AlreadyCancelled
+        elif self.called:
+            raise error.AlreadyCalled
+        else:
+            newTime = self.seconds() + secondsFromNow
+            if newTime < self.time:
+                self.delayed_time = 0
+                self.time = newTime
+                self.resetter(self)
+            else:
+                self.delayed_time = newTime - self.time
+            self._schedule_call()
+
+    def delay(self, secondsLater):
+        """Reschedule this call for a later time
+        @type secondsLater: C{float}
+        @param secondsLater: The number of seconds after the originally
+        scheduled time for which to reschedule this call.
+        @raise AlreadyCancelled: Raised if this call has been cancelled.
+        @raise AlreadyCalled: Raised if this call has already been made.
+        """
+        if self.cancelled:
+            raise error.AlreadyCancelled
+        elif self.called:
+            raise error.AlreadyCalled
+        else:
+            self.delayed_time += secondsLater
+            if self.delayed_time < 0:
+                self.activate_delay()
+                self.resetter(self)
+
+    def activate_delay(self):
+        self.time += self.delayed_time
+        self.delayed_time = 0
+        self._schedule_call()
+
+    def active(self):
+        """Determine whether this call is still pending
+        @rtype: C{bool}
+        @return: True if this call has not yet been made or cancelled,
+        False otherwise.
+        """
+        return not (self.cancelled or self.called)
+
+    def __le__(self, other):
+        """
+        Implement C{<=} operator between two L{DelayedCall} instances.
+        Comparison is based on the C{time} attribute (unadjusted by the
+        delayed time).
+        """
+        return self.time <= other.time
+
+    def __lt__(self, other):
+        """
+        Implement C{<} operator between two L{DelayedCall} instances.
+        Comparison is based on the C{time} attribute (unadjusted by the
+        delayed time).
+        """
+        return self.time < other.time
+
+    def __str__(self):
+        if self._str is not None:
+            return self._str
+        if hasattr(self, 'func'):
+            # This code should be replaced by a utility function in reflect;
+            # see ticket #6066:
+            if hasattr(self.func, '__qualname__'):
+                func = self.func.__qualname__
+            elif hasattr(self.func, '__name__'):
+                func = self.func.func_name
+                if hasattr(self.func, 'im_class'):
+                    func = self.func.im_class.__name__ + '.' + func
+            else:
+                func = reflect.safe_repr(self.func)
+        else:
+            func = None
+
+        now = self.seconds()
+        L = ["<DelayedCall 0x%x [%ss] called=%s cancelled=%s" % (
+                id(self), self.time - now, self.called,
+                self.cancelled)]
+        if func is not None:
+            L.extend((" ", func, "("))
+            if self.args:
+                L.append(", ".join([reflect.safe_repr(e) for e in self.args]))
+                if self.kw:
+                    L.append(", ")
+            if self.kw:
+                L.append(", ".join(['%s=%s' % (k, reflect.safe_repr(v)) for (k, v) in self.kw.items()]))
+            L.append(")")
+
+        if self.debug:
+            L.append("\n\ntraceback at creation: \n\n%s" % ('    '.join(self.creator)))
+        L.append('>')
+
+        return "".join(L)
+
+
+class ClockReactorless(object):
+    """
+    Provide a deterministic, easily-controlled implementation of
+    L{IReactorTime.callLater}.  This is commonly useful for writing
+    deterministic unit tests for code which schedules events using this API.
+    """
+
+    rightNow = 0.0
+
+    def __init__(self):
+        self.calls = []
+        self.timer = None
+
+    def seconds(self):
+        """
+        Pretend to be time.time().  This is used internally when an operation
+        such as L{IDelayedCall.reset} needs to determine a time value
+        relative to the current time.
+        @rtype: C{float}
+        @return: The time which should be considered the current time.
+        """
+        self.rightNow = time.time()
+        return self.rightNow
+
+    def _sortCalls(self):
+        """
+        Sort the pending calls according to the time they are scheduled.
+        """
+        self.calls.sort(key=lambda a: a.getTime())
+
+    def callLater(self, when, what, *a, **kw):
+        """
+        See L{twisted.internet.interfaces.IReactorTime.callLater}.
+        """
+
+        # def defer_later_cancel(deferred):
+        #     delayed_call.cancel()
+        #
+        # dc = defer.Deferred(defer_later_cancel)
+        # dc.addCallback(lambda ignored: what(*a, **kw))
+        # delayed_call = threading.Timer(when, dc.callback, [None])
+        # delayed_call.start()
+        # self.calls.append(dc)
+        # self._sortCalls()
+
+        dc = DelayedCallReactorless(self.seconds() + when,
+                                    what, a, kw,
+                                    self.calls.remove,
+                                    lambda c: None,
+                                    self.seconds)
+        self.calls.append(dc)
+        self._sortCalls()
+        return dc
+
+    def getDelayedCalls(self):
+        """
+        See L{twisted.internet.interfaces.IReactorTime.getDelayedCalls}
+        """
+        return self.calls
+
+    def advance(self, amount):
+        """
+        Move time on this clock forward by the given amount and run whatever
+        pending calls should be run.
+        @type amount: C{float}
+        @param amount: The number of seconds which to advance this clock's
+        time.
+        """
+        self.rightNow += amount
+        # self._sortCalls()
+        while self.calls and self.calls[0].getTime() <= self.seconds():
+            call = self.calls.pop(0)
+            call.called = 1
+            call.func(*call.args, **call.kw)
+            # self._sortCalls()
+
+    def pump(self, timings):
+        """
+        Advance incrementally by the given set of times.
+        @type timings: iterable of C{float}
+        """
+        for amount in timings:
+            self.advance(amount)
+
+
 def test_cb(result):
     logger.debug("Returned {0}".format(result))
 
 
 def test_err(err):
     logger.error("ERROR Returned {0}".format(err))
+
+
+def test_timeout(result):
+    logger.warning("TIMEOUT returned {0}".format(result))
 
 
 if __name__ == "__main__":
@@ -384,6 +778,17 @@ if __name__ == "__main__":
     da = fc.write_attribute("double_scalar_w", "motor", 10)
     da.addCallbacks(test_cb, test_err)
 
-    da = fc.defer_later(3.0, fc.read_attribute, "short_scalar", "motor")
-    da.addCallback(test_cb, test_err)
+    # da = fc.defer_later(3.0, fc.read_attribute, "short_scalar", "motor")
+    # da.addCallback(test_cb, test_err)
+
+    # lc = LoopingCall(fc.read_attribute, "double_scalar_w", "motor")
+    # dlc = lc.start(1)
+    # dlc.addCallbacks(test_cb, test_err)
+    # lc.loop_deferred.addCallback(test_cb)
+
+    clock = ClockReactorless()
+
+    defcond = DeferredCondition("result.value>15", fc.read_attribute, "double_scalar_w", "motor")
+    dcd = defcond.start(1.0, timeout=3.0)
+    dcd.addCallbacks(test_cb, test_err)
 
