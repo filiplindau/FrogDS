@@ -174,14 +174,6 @@ class TangoAttributeFactory(Factory):
         return d
 
 
-class TangoAttributeReader(object):
-    def __init__(self, device_name):
-        self.device_name = device_name
-
-    def doRead(self):
-        pass
-
-
 class FrogController(object):
     def __init__(self, spectrometer_name, motor_name):
         """
