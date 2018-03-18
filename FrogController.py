@@ -188,23 +188,23 @@ class FrogController(object):
         self.device_names["spectrometer"] = spectrometer_name
         self.device_names["motor"] = motor_name
 
-        self.device_factories = dict()
-        self.device_factories["spectrometer"] = TangoAttributeFactory(spectrometer_name)
-        self.device_factories["motor"] = TangoAttributeFactory(motor_name)
+        self.device_factory_dict = dict()
+        self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
+        self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
 
         self.logger = logging.getLogger("FrogController.Controller")
         self.logger.setLevel(logging.DEBUG)
 
-        for dev_fact in self.device_factories:
-            self.device_factories[dev_fact].doStart()
+        for dev_fact in self.device_factory_dict:
+            self.device_factory_dict[dev_fact].doStart()
 
     def read_attribute(self, name, device_name):
         self.logger.info("Read attribute \"{0}\" on \"{1}\"".format(name, device_name))
         if device_name in self.device_names:
-            factory = self.device_factories[device_name]
+            factory = self.device_factory_dict[device_name]
             d = factory.buildProtocol("read", name)
         else:
-            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
+            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factory_dict))
             err = tango.DevError(reason="Device {0} not used".format(device_name),
                                  severety=tango.ErrSeverity.ERR,
                                  desc="The device is not in the list of devices used by this controller",
@@ -215,10 +215,10 @@ class FrogController(object):
     def write_attribute(self, name, device_name, data):
         self.logger.info("Write attribute \"{0}\" on \"{1}\"".format(name, device_name))
         if device_name in self.device_names:
-            factory = self.device_factories[device_name]
+            factory = self.device_factory_dict[device_name]
             d = factory.buildProtocol("write", name, data)
         else:
-            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factories))
+            self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factory_dict))
             err = tango.DevError(reason="Device {0} not used".format(device_name),
                                  severety=tango.ErrSeverity.ERR,
                                  desc="The device is not in the list of devices used by this controller",
@@ -240,14 +240,22 @@ class FrogController(object):
 
 
 class FrogState(object):
-    def __init__(self):
+    def __init__(self, controller):
         self.name = ""
+        self.controller = controller
+        self.logger = logging.getLogger("FrogController.FrogState")
+        self.logger.setLevel(logging.DEBUG)
+        self.deferred_list = list()
 
     def state_enter(self):
         pass
 
     def state_exit(self):
-        pass
+        for d in self.deferred_list:
+            try:
+                d.cancel()
+            except defer.CancelledError:
+                pass
 
     def run(self):
         pass
@@ -266,23 +274,28 @@ class FrogState(object):
     def get_name(self):
         return self.name
 
+    def get_state(self):
+        return self.name
+
 
 class DeviceConnectState(FrogState):
-    def __init__(self, device_name_list):
-        FrogState.__init__(self)
+    def __init__(self, device_names, controller):
+        FrogState.__init__(self, controller)
         self.name = "device_init"
-        self.device_name_list = device_name_list
-        self.device_factory_dict = dict()
+        self.controller.device_names = device_names
+        self.controller.device_factory_dict = dict()
         self.deferred_list = list()
+        self.logger.name = self.name
 
     def state_enter(self):
         dl = list()
-        for dev_name in self.device_name_list:
+        for dev_name in self.controller.device_names:
             fact = TangoAttributeFactory(dev_name)
             dl.append(fact.startFactory())
-            self.device_factory_dict[dev_name] = fact
-        self.deferred_list = defer.DeferredList(dl)
-        self.deferred_list.addCallbacks(self.check_requirements, self.state_error)
+            self.controller.device_factory_dict[dev_name] = fact
+        def_list = defer.DeferredList(dl)
+        self.deferred_list.append(def_list)
+        def_list.addCallbacks(self.check_requirements, self.state_error)
 
     def state_error(self, err):
         pass
