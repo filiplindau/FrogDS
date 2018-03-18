@@ -95,6 +95,7 @@ class TangoAttributeFactory(Factory):
         self.logger.info("Starting TangoAttributeFactory")
         self.d = deferred_from_future(tangof.DeviceProxy(self.device_name, wait=False))
         self.d.addCallbacks(self.connection_success, self.connection_fail)
+        return d
 
     def buildProtocol(self, operation, name, data=None, d=None):
         """
@@ -236,6 +237,58 @@ class FrogController(object):
         delayed_call = threading.Timer(delay, d.callback, [None])
         delayed_call.start()
         return d
+
+
+class FrogState(object):
+    def __init__(self):
+        self.name = ""
+
+    def state_enter(self):
+        pass
+
+    def state_exit(self):
+        pass
+
+    def run(self):
+        pass
+
+    def check_requirements(self, result):
+        """
+        If next_state is None: stay on this state, else switch state
+        :return:
+        """
+        next_state = None
+        return next_state
+
+    def state_error(self, err):
+        pass
+
+    def get_name(self):
+        return self.name
+
+
+class DeviceConnectState(FrogState):
+    def __init__(self, device_name_list):
+        FrogState.__init__(self)
+        self.name = "device_init"
+        self.device_name_list = device_name_list
+        self.device_factory_dict = dict()
+        self.deferred_list = list()
+
+    def state_enter(self):
+        dl = list()
+        for dev_name in self.device_name_list:
+            fact = TangoAttributeFactory(dev_name)
+            dl.append(fact.startFactory())
+            self.device_factory_dict[dev_name] = fact
+        self.deferred_list = defer.DeferredList(dl)
+        self.deferred_list.addCallbacks(self.check_requirements, self.state_error)
+
+    def state_error(self, err):
+        pass
+
+    def check_requirements(self, result):
+        return "setup_attributes"
 
 
 class LoopingCall(object):
