@@ -16,6 +16,8 @@ from twisted.python.failure import Failure, reflect
 import PyTango as tango
 import PyTango.futures as tangof
 from TangoTwisted import TangoAttributeFactory, TangoAttributeProtocol, LoopingCall, DeferredCondition, ClockReactorless
+import FrogState as fs
+reload(fs)
 
 
 logger = logging.getLogger("FrogController")
@@ -43,15 +45,16 @@ class FrogController(object):
         self.device_names["spectrometer"] = spectrometer_name
         self.device_names["motor"] = motor_name
 
-        self.device_factory_dict = dict()
-        self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
-        self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
+        # self.device_factory_dict = dict()
+        # self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
+        # self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
 
         self.logger = logging.getLogger("FrogController.Controller")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.info("FrogController.__init__")
 
-        for dev_fact in self.device_factory_dict:
-            self.device_factory_dict[dev_fact].doStart()
+        # for dev_fact in self.device_factory_dict:
+        #     self.device_factory_dict[dev_fact].doStart()
 
     def read_attribute(self, name, device_name):
         self.logger.info("Read attribute \"{0}\" on \"{1}\"".format(name, device_name))
@@ -109,10 +112,13 @@ def test_timeout(result):
 if __name__ == "__main__":
     fc = FrogController("sys/tg_test/1", "sys/tg_test/1")
     time.sleep(0)
-    da = fc.read_attribute("double_scalar", "motor")
-    da.addCallbacks(test_cb, test_err)
-    da = fc.write_attribute("double_scalar_w", "motor", 10)
-    da.addCallbacks(test_cb, test_err)
+    sh = fs.FrogStateDispatcher(fc)
+    sh.start()
+
+    # da = fc.read_attribute("double_scalar", "motor")
+    # da.addCallbacks(test_cb, test_err)
+    # da = fc.write_attribute("double_scalar_w", "motor", 10)
+    # da.addCallbacks(test_cb, test_err)
 
     # da = fc.defer_later(3.0, fc.read_attribute, "short_scalar", "motor")
     # da.addCallback(test_cb, test_err)
@@ -122,9 +128,9 @@ if __name__ == "__main__":
     # dlc.addCallbacks(test_cb, test_err)
     # lc.loop_deferred.addCallback(test_cb)
 
-    clock = ClockReactorless()
-
-    defcond = DeferredCondition("result.value>15", fc.read_attribute, "double_scalar_w", "motor")
-    dcd = defcond.start(1.0, timeout=3.0)
-    dcd.addCallbacks(test_cb, test_err)
+    # clock = ClockReactorless()
+    #
+    # defcond = DeferredCondition("result.value>15", fc.read_attribute, "double_scalar_w", "motor")
+    # dcd = defcond.start(1.0, timeout=3.0)
+    # dcd.addCallbacks(test_cb, test_err)
 

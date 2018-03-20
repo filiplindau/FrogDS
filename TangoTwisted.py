@@ -16,6 +16,15 @@ import PyTango.futures as tangof
 
 logger = logging.getLogger("TangoTwisted")
 logger.setLevel(logging.DEBUG)
+while len(logger.handlers):
+    logger.removeHandler(logger.handlers[0])
+
+# f = logging.Formatter("%(asctime)s - %(module)s.   %(funcName)s - %(levelname)s - %(message)s")
+f = logging.Formatter("%(asctime)s - %(name)s.   %(funcName)s - %(levelname)s - %(message)s")
+fh = logging.StreamHandler()
+fh.setFormatter(f)
+logger.addHandler(fh)
+logger.setLevel(logging.DEBUG)
 
 
 def deferred_from_future(future):
@@ -407,6 +416,19 @@ class DeferredCondition(object):
         d, self._deferred = self._deferred, None
         d.errback(err)
         return err
+
+
+def defer_later(delay, delayed_callable, *a, **kw):
+    logger.info("Calling {0} in {1} seconds".format(delayed_callable, delay))
+
+    def defer_later_cancel(deferred):
+        delayed_call.cancel()
+
+    d = defer.Deferred(defer_later_cancel)
+    d.addCallback(lambda ignored: delayed_callable(*a, **kw))
+    delayed_call = threading.Timer(delay, d.callback, [None])
+    delayed_call.start()
+    return d
 
 
 class DelayedCallReactorless(object):
