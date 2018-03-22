@@ -119,8 +119,7 @@ class FrogController(object):
         :param write: Set to True if the target value should be written initially
         :return: Deferred that will fire depending on the result of the check
         """
-        if write is True:
-            dw =
+        pass
 
     def get_state(self):
         with self.state_lock:

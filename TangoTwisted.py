@@ -57,6 +57,7 @@ class TangoAttributeProtocol(Protocol):
         self._check_timeout = 1.0
         self._check_tolerance = None
         self._check_starttime = None
+        self._check_lastreadtime = None
 
         self.logger = logging.getLogger("FrogController.Protocol_{0}_{1}".format(operation.upper(), name))
         self.logger.setLevel(logging.WARNING)
@@ -100,6 +101,7 @@ class TangoAttributeProtocol(Protocol):
         :param write: Set to True if the target value should be written initially
         :return: Deferred that will fire depending on the result of the check
         """
+        self.logger.info("Entering check_attribute")
         self.d = defer.Deferred()
 
         try:
@@ -109,28 +111,36 @@ class TangoAttributeProtocol(Protocol):
         try:
             self._check_timeout = self.kw["timeout"]
         except KeyError:
+            self.logger.debug("No timeout specified, using 1.0 s")
             self._check_timeout = 1.0
         try:
             self._check_tolerance = self.kw["tolerance"]
         except KeyError:
             self._check_tolerance = None
+            self.logger.debug("No tolerance specified, using None")
         try:
             self._check_period = self.kw["period"]
         except KeyError:
-            self._check_period = True
+            self._check_period = 0.3
+            self.logger.debug("No period specified, using 0.3 s")
         try:
             self._check_target_value = self.kw["target_value"]
         except KeyError:
             self._check_target_value = None
+            self.logger.error("No target value specified")
             self.d.errback("Target value required")
             return self.d
 
         self._check_starttime = time.time()
+        self._check_lastreadtime = self._check_starttime
 
         if write is True:
+            self.logger.debug("Issuing initial write")
             dw = deferred_from_future(self.factory.device.write_attribute(self.name, target_value, wait=False))
+            # Add a callback that starts the reading after write completes
             dw.addCallbacks(self._check_do_read, self._check_fail)
 
+        # Return the deferred that will fire with the result of the check
         return self.d
 
     def _check_w_done(self, result):
@@ -143,31 +153,44 @@ class TangoAttributeProtocol(Protocol):
         return err
 
     def _check_do_read(self, result=None):
+        self.logger.info("Issuing read ")
         dr = deferred_from_future(self.factory.device.read_attribute(self.name, wait=False))
         dr.addCallbacks(self._check_read_done, self._check_fail)
 
     def _check_read_done(self, result):
         self.logger.info("Read done, result {0}".format(result))
         t0 = time.time()
+        # First check if we timed out. Then fire the errback function and exit.
         if t0 - self._check_starttime > self._check_timeout:
             self.d.errback("timeout")
+            return
+        # Now try extracting the read value (sometimes this is None).
+        try:
+            val = result.value
+        except AttributeError:
+            self.d.errback("Read result error {0}".format(result))
+            return
+
+        # Check if the read value is within tolerance. Then fire the callback and exit.
+        done = False
+        if self._check_tolerance is None:
+            if val == self._check_target_value:
+                done = True
         else:
-            try:
-                val = result.value
-            except AttributeError:
-                self.d.errback("Read result error {0}".format(result))
-            done = False
-            if self._check_tolerance is None:
-                if val == self._check_target_value:
-                    done = True
-            else:
-                if abs(val - self._check_target_value) < self._check_tolerance:
-                    done = True
-            if done is True:
-                self.d.callback(val)
-            else:
-                delay = self._check_period
-                defer_later(delay, self._check_do_read)
+            if abs(val - self._check_target_value) < self._check_tolerance:
+                done = True
+        if done is True:
+            self.d.callback(val)
+            return
+
+        # Finally calculate the wait time until next read.
+        last_duration = t0 - self._check_lastreadtime
+        if last_duration > self._check_period:
+            delay = 0
+        else:
+            delay = self._check_period - last_duration
+        defer_later(delay, self._check_do_read)
+        self._check_lastreadtime = t0
 
 
 class TangoAttributeFactory(Factory):
