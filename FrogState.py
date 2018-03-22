@@ -57,15 +57,21 @@ class FrogStateDispatcher(object):
         self.logger.info("Entering state handler dispatcher")
         prev_state = self.get_state()
         while self.stop_flag is False:
+            # Determine which state object to construct:
             try:
                 state_name = self.get_state()
                 self.logger.debug("New state: {0}".format(state_name.upper()))
                 self._state_obj = self.statehandler_dict[state_name](self.controller)
             except KeyError:
+                state_name = "unknown"
                 self.statehandler_dict[FrogStateUnknown.name]
+            self.controller.set_state(state_name)
+            # Do the state sequence: enter - run - exit
             self._state_obj.state_enter(prev_state)
-            self._state_obj.run()     # <- this should be run in a loop either in state
+            self._state_obj.run()       # <- this should be run in a loop in state object and
+            # return when it's time to change state
             new_state = self._state_obj.state_exit()
+            # Set new state:
             self.set_state(new_state)
             prev_state = state_name
         self._state_thread = None
@@ -74,8 +80,13 @@ class FrogStateDispatcher(object):
         return self.current_state
 
     def set_state(self, state_name):
-        self.logger.info("Current state: {0}, set new state {1}".format(self.current_state.upper(), state_name.upper()))
-        self.current_state = state_name
+        try:
+            self.logger.info("Current state: {0}, set new state {1}".format(self.current_state.upper(),
+                                                                            state_name.upper()))
+            self.current_state = state_name
+        except AttributeError:
+            logger.debug("New state unknown. Got {0}, setting to UNKNOWN".format(state_name))
+            self.current_state = "unknown"
 
     def stop(self):
         self.logger.info("Stop state handler thread")
@@ -101,9 +112,12 @@ class FrogState(object):
         self.deferred_list = list()
         self.next_state = None
         self.cond_obj = threading.Condition()
+        self.running = False
 
     def state_enter(self, prev_state=None):
         self.logger.info("Entering state {0}".format(self.name.upper()))
+        with self.cond_obj:
+            self.running = True
 
     def state_exit(self):
         self.logger.info("Exiting state {0}".format(self.name.upper()))
@@ -115,9 +129,10 @@ class FrogState(object):
         return self.next_state
 
     def run(self):
-        self.logger.info("Entering run")
+        self.logger.info("Entering run, run condition {0}".format(self.running))
         with self.cond_obj:
-            self.cond_obj.wait()
+            if self.running is True:
+                self.cond_obj.wait()
         self.logger.debug("Exiting run")
 
     def check_requirements(self, result):
@@ -143,6 +158,8 @@ class FrogState(object):
     def stop_run(self):
         self.logger.info("Notify condition to stop run")
         with self.cond_obj:
+            self.running = False
+            self.logger.debug("Run condition {0}".format(self.running))
             self.cond_obj.notify_all()
 
 
@@ -168,6 +185,8 @@ class FrogStateDeviceConnect(FrogState):
 
     def state_enter(self, prev_state):
         self.logger.info("Starting state {0}".format(self.name.upper()))
+        with self.cond_obj:
+            self.running = True
         dl = list()
         for key, dev_name in self.controller.device_names.items():
             self.logger.debug("Connect to device {0}".format(dev_name))
@@ -185,6 +204,13 @@ class FrogStateDeviceConnect(FrogState):
         self.stop_run()
         return "setup_attributes"
 
+    def state_error(self, err):
+        self.logger.error("Error: {0}".format(err))
+        self.controller.set_status("Error: {0}".format(err))
+        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+        self.next_state = "unknown"
+        self.stop_run()
+
 
 class FrogStateSetupAttributes(FrogState):
     """
@@ -200,9 +226,14 @@ class FrogStateSetupAttributes(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
-        self.controller.device_factory_dict = dict()
         self.deferred_list = list()
-        self.logger.name = self.name
+
+    def state_enter(self, prev_state=None):
+        # Motor setup:
+        dm_1 = self.controller.read_attribute("state", "motor")
+        dm_2 = self.controller.read_attribute("microstepresolution", "motor")
+        dm_1.addCallback(dm_2)
+
 
 
 class FrogStateScan(FrogState):
@@ -276,6 +307,7 @@ class FrogStateUnknown(FrogState):
         df = defer_later(self.wait_time, self.check_requirements, [None])
         self.deferred_list.append(df)
         df.addCallback(test_cb)
+        self.running = True
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result {0} for state {1}".format(result, self.name.upper()))

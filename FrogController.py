@@ -45,13 +45,17 @@ class FrogController(object):
         self.device_names["spectrometer"] = spectrometer_name
         self.device_names["motor"] = motor_name
 
-        # self.device_factory_dict = dict()
+        self.device_factory_dict = dict()
         # self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
         # self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
 
         self.logger = logging.getLogger("FrogController.Controller")
         self.logger.setLevel(logging.DEBUG)
         self.logger.info("FrogController.__init__")
+
+        self.state_lock = threading.Lock()
+        self.status = ""
+        self.state = "unknown"
 
         # for dev_fact in self.device_factory_dict:
         #     self.device_factory_dict[dev_fact].doStart()
@@ -95,6 +99,46 @@ class FrogController(object):
         delayed_call = threading.Timer(delay, d.callback, [None])
         delayed_call.start()
         return d
+
+    def check_attribute(self, attr_name, dev_name, target_value, period=0.3, retries=5, tolerance=None, write=True):
+        """
+        Check an attribute to see if it reaches a target value. Returns a deferred for the result of the
+        check.
+        Upon calling the function the target is written to the attribute if the "write" parameter is True.
+        Then reading the attribute is polled with the period "period" for a maximum number of retries.
+        If the read value is within tolerance, the callback deferred is fired.
+        If the read value is outside tolerance after retires attempts, the errback is fired.
+        The maximum time to check is then period x retries
+
+        :param attr_name: Tango name of the attribute to check, e.g. "position"
+        :param dev_name: Tango device name to use, e.g. "gunlaser/motors/zaber01"
+        :param target_value: Attribute value to wait for
+        :param period: Polling period when checking the value
+        :param retries: Number of retries before giving up
+        :param tolerance: Absolute tolerance for the value to be accepted
+        :param write: Set to True if the target value should be written initially
+        :return: Deferred that will fire depending on the result of the check
+        """
+        if write is True:
+            dw =
+
+    def get_state(self):
+        with self.state_lock:
+            st = self.state
+        return st
+
+    def set_state(self, state):
+        with self.state_lock:
+            self.state = state
+
+    def get_status(self):
+        with self.state_lock:
+            st = self.status
+        return st
+
+    def set_status(self, status_msg):
+        with self.state_lock:
+            self.status = status_msg
 
 
 def test_cb(result):
