@@ -60,7 +60,7 @@ class TangoAttributeProtocol(Protocol):
         self._check_lastreadtime = None
 
         self.logger = logging.getLogger("FrogController.Protocol_{0}_{1}".format(operation.upper(), name))
-        self.logger.setLevel(logging.WARNING)
+        self.logger.setLevel(logging.CRITICAL)
 
     def makeConnection(self, transport=None):
         self.logger.debug("Protocol {0} make connection".format(self.name))
@@ -70,6 +70,8 @@ class TangoAttributeProtocol(Protocol):
             self.d = deferred_from_future(self.factory.device.write_attribute(self.name, self.data, wait=False))
         elif self.operation == "command":
             self.d = deferred_from_future(self.factory.device.command_inout(self.name, self.data, wait=False))
+        elif self.operation == "check":
+            self.d = self.check_attribute()
         self.d.addCallbacks(self.dataReceived, self.connectionLost)
         return self.d
 
@@ -82,7 +84,8 @@ class TangoAttributeProtocol(Protocol):
         self.logger.debug("Connection lost, reason {0}".format(reason))
         return reason
 
-    def check_attribute(self, attr_name, dev_name, target_value, period=0.3, timeout=1.0, tolerance=None, write=True):
+    # def check_attribute(self, attr_name, dev_name, target_value, period=0.3, timeout=1.0, tolerance=None, write=True):
+    def check_attribute(self):
         """
         Check an attribute to see if it reaches a target value. Returns a deferred for the result of the
         check.
@@ -136,7 +139,9 @@ class TangoAttributeProtocol(Protocol):
 
         if write is True:
             self.logger.debug("Issuing initial write")
-            dw = deferred_from_future(self.factory.device.write_attribute(self.name, target_value, wait=False))
+            dw = deferred_from_future(self.factory.device.write_attribute(self.name,
+                                                                          self._check_target_value,
+                                                                          wait=False))
             # Add a callback that starts the reading after write completes
             dw.addCallbacks(self._check_do_read, self._check_fail)
 
@@ -162,6 +167,7 @@ class TangoAttributeProtocol(Protocol):
         t0 = time.time()
         # First check if we timed out. Then fire the errback function and exit.
         if t0 - self._check_starttime > self._check_timeout:
+            self.logger.warning("Timeout exceeded")
             self.d.errback("timeout")
             return
         # Now try extracting the read value (sometimes this is None).
@@ -180,7 +186,8 @@ class TangoAttributeProtocol(Protocol):
             if abs(val - self._check_target_value) < self._check_tolerance:
                 done = True
         if done is True:
-            self.d.callback(val)
+            self.logger.debug("Result {0} with tolerance of target value {1}".format(val, self._check_target_value))
+            self.d.callback(result)
             return
 
         # Finally calculate the wait time until next read.
@@ -189,6 +196,7 @@ class TangoAttributeProtocol(Protocol):
             delay = 0
         else:
             delay = self._check_period - last_duration
+        self.logger.debug("Delay until next read: {0}".format(delay))
         defer_later(delay, self._check_do_read)
         self._check_lastreadtime = t0
 
@@ -213,7 +221,7 @@ class TangoAttributeFactory(Factory):
         self.d.addCallbacks(self.connection_success, self.connection_fail)
         return self.d
 
-    def buildProtocol(self, operation, name, data=None, d=None):
+    def buildProtocol(self, operation, name, data=None, d=None, **kw):
         """
         Create a TangoAttributeProtocol that sends a Tango operation to the factory deviceproxy.
 
@@ -225,7 +233,8 @@ class TangoAttributeFactory(Factory):
         """
         if self.connected is True:
             self.logger.info("Connected, create protocol and makeConnection")
-            proto = self.protocol(operation, name, data)
+            self.logger.debug("args: {0}, {1}, {2}, kw: {3}".format(operation, name, data, kw))
+            proto = self.protocol(operation, name, data, **kw)
             proto.factory = self
             self.proto_list.append(proto)
             df = proto.makeConnection()
@@ -235,12 +244,13 @@ class TangoAttributeFactory(Factory):
         else:
             self.logger.debug("Not connected yet, adding to connect callback")
             # df = defer.Deferred()
-            self.d.addCallbacks(self.build_protocol_cb, self.connection_fail, callbackArgs=[operation, name, data])
+            self.d.addCallbacks(self.build_protocol_cb, self.connection_fail, callbackArgs=[operation, name, data],
+                                callbackKeywords=kw)
             df = self.d
 
         return df
 
-    def build_protocol_cb(self, result, operation, name, data, df=None):
+    def build_protocol_cb(self, result, operation, name, data, df=None, **kw):
         """
         We need this extra callback for buildProtocol since the first argument
         is always the callback result.
@@ -253,7 +263,7 @@ class TangoAttributeFactory(Factory):
         :return: Deferred that fires when the Tango operation is completed.
         """
         self.logger.debug("Now call build protocol")
-        d = self.buildProtocol(operation, name, data, df)
+        d = self.buildProtocol(operation, name, data, df, **kw)
         return d
 
     def connection_success(self, result):
@@ -537,7 +547,7 @@ class DeferredCondition(object):
 
 
 def defer_later(delay, delayed_callable, *a, **kw):
-    logger.info("Calling {0} in {1} seconds".format(delayed_callable, delay))
+    # logger.info("Calling {0} in {1} seconds".format(delayed_callable, delay))
 
     def defer_later_cancel(deferred):
         delayed_call.cancel()
@@ -555,7 +565,7 @@ class DelayedCallReactorless(object):
     debug = False
     _str = None
 
-    def __init__(self, time, func, args, kw, cancel, reset,
+    def __init__(self, time, func, args, kw={}, cancel=None, reset=None,
                  seconds=time.time):
         """
         @param time: Seconds from the epoch at which to call C{func}.
@@ -617,7 +627,8 @@ class DelayedCallReactorless(object):
             if self.timer is not None:
                 if self.timer.is_alive() is True:
                     self.timer.cancel()
-            self.canceller(self)
+            if self.canceller is not None:
+                self.canceller(self)
             self.cancelled = 1
             if self.debug:
                 self._str = str(self)
@@ -640,7 +651,8 @@ class DelayedCallReactorless(object):
             if new_time < self.time:
                 self.delayed_time = 0
                 self.time = new_time
-                self.resetter(self)
+                if self.resetter is not None:
+                    self.resetter(self)
             else:
                 self.delayed_time = new_time - self.time
             self._schedule_call()
@@ -813,3 +825,92 @@ class ClockReactorless(object):
         """
         for amount in timings:
             self.advance(amount)
+
+
+def test_cb2(result):
+    logger.info("Test CB2 result: {0}".format(result))
+    return result
+
+
+class Scan(object):
+    def __init__(self, controller, scan_attr_name, scan_dev_name, start_pos, stop_pos, step,
+                 meas_attr_name, meas_dev_name):
+        self.controller = controller
+        self.scan_attr = scan_attr_name
+        self.scan_dev = scan_dev_name
+        self.start_pos = start_pos
+        self.stop_pos = stop_pos
+        self.step = step
+        self.meas_attr = meas_attr_name
+        self.meas_dev = meas_dev_name
+
+        self.current_pos = None
+        self.pos_data = []
+        self.meas_data = []
+
+        self.logger = logging.getLogger("FrogController.Scan_{0}_{1}".format(self.scan_attr, self.meas_attr))
+        self.logger.setLevel(logging.DEBUG)
+
+        self.d = defer.Deferred()
+
+        # Add errback handling!
+
+    def start_scan(self):
+        self.logger.info("Starting scan of {0} from {1} to {2} measuring {3}".format(self.scan_attr.upper(),
+                                                                                     self.start_pos,
+                                                                                     self.stop_pos,
+                                                                                     self.meas_attr.upper()))
+        scan_pos = self.start_pos
+        tol = self.step * 0.1
+        d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
+                                             0.1, 3.0, tolerance=tol, write=True)
+        d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
+        # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
+        # d0.addCallback(self.meas_scan)
+
+        return self.d
+
+    def scan_step(self):
+        self.logger.info("Scan step")
+        tol = self.step * 0.1
+        scan_pos = self.current_pos + self.step
+        if scan_pos > self.stop_pos:
+            self.logger.debug("Scan done!")
+            self.d.callback([self.pos_data, self.meas_data])
+
+        d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
+                                             0.1, 3.0, tolerance=tol, write=True)
+        d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
+        # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
+        # d0.addCallback(self.meas_scan)
+        return d0
+
+    def scan_arrive(self, result):
+        try:
+            self.current_pos = result.value
+        except AttributeError:
+            self.logger.error("Scan arrive not returning attribute: {0}".format(result))
+            return False
+
+        self.logger.info("Scan arrive at pos {0}".format(self.current_pos))
+        d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
+        # d0.addCallback(test_cb2)
+        d0.addCallbacks(self.meas_scan, self.scan_error_cb)
+        return True
+
+    def meas_scan(self, result):
+        self.logger.info("Meas scan result: {0}".format(result.value))
+        measure_value = result.value
+        # try:
+        #     measure_value = result.value
+        # except AttributeError:
+        #     self.logger.error("Measurement not returning attribute: {0}".format(result))
+        #     return False
+        self.logger.info("Measure at scan pos {0} result: {1}".format(self.current_pos, measure_value))
+        self.meas_data.append(measure_value)
+        self.pos_data.append(self.current_pos)
+        self.scan_step()
+        return True
+
+    def scan_error_cb(self, err):
+        self.logger.error("Scan error: {0}".format(err))

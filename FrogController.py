@@ -15,9 +15,12 @@ from twisted.internet.protocol import Protocol, ClientFactory, Factory
 from twisted.python.failure import Failure, reflect
 import PyTango as tango
 import PyTango.futures as tangof
-from TangoTwisted import TangoAttributeFactory, TangoAttributeProtocol, LoopingCall, DeferredCondition, ClockReactorless
+import TangoTwisted
+from TangoTwisted import TangoAttributeFactory, TangoAttributeProtocol, \
+    LoopingCall, DeferredCondition, ClockReactorless, defer_later
 import FrogState as fs
 reload(fs)
+reload(TangoTwisted)
 
 
 logger = logging.getLogger("FrogController")
@@ -46,8 +49,8 @@ class FrogController(object):
         self.device_names["motor"] = motor_name
 
         self.device_factory_dict = dict()
-        # self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
-        # self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
+        self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
+        self.device_factory_dict["motor"] = TangoAttributeFactory(motor_name)
 
         self.logger = logging.getLogger("FrogController.Controller")
         self.logger.setLevel(logging.DEBUG)
@@ -57,8 +60,8 @@ class FrogController(object):
         self.status = ""
         self.state = "unknown"
 
-        # for dev_fact in self.device_factory_dict:
-        #     self.device_factory_dict[dev_fact].doStart()
+        for dev_fact in self.device_factory_dict:
+            self.device_factory_dict[dev_fact].startFactory()
 
     def read_attribute(self, name, device_name):
         self.logger.info("Read attribute \"{0}\" on \"{1}\"".format(name, device_name))
@@ -100,7 +103,7 @@ class FrogController(object):
         delayed_call.start()
         return d
 
-    def check_attribute(self, attr_name, dev_name, target_value, period=0.3, retries=5, tolerance=None, write=True):
+    def check_attribute(self, attr_name, dev_name, target_value, period=0.3, timeout=1.0, tolerance=None, write=True):
         """
         Check an attribute to see if it reaches a target value. Returns a deferred for the result of the
         check.
@@ -114,12 +117,24 @@ class FrogController(object):
         :param dev_name: Tango device name to use, e.g. "gunlaser/motors/zaber01"
         :param target_value: Attribute value to wait for
         :param period: Polling period when checking the value
-        :param retries: Number of retries before giving up
+        :param timeout: Time to wait for the attribute to reach target value
         :param tolerance: Absolute tolerance for the value to be accepted
         :param write: Set to True if the target value should be written initially
         :return: Deferred that will fire depending on the result of the check
         """
-        pass
+        self.logger.info("Check attribute \"{0}\" on \"{1}\"".format(attr_name, dev_name))
+        if dev_name in self.device_names:
+            factory = self.device_factory_dict[dev_name]
+            d = factory.buildProtocol("check", attr_name, None, write=write, target_value=target_value,
+                                      tolerance=tolerance, period=period, timeout=timeout)
+        else:
+            self.logger.error("Device name {0} not found among {1}".format(dev_name, self.device_factory_dict))
+            err = tango.DevError(reason="Device {0} not used".format(dev_name),
+                                 severety=tango.ErrSeverity.ERR,
+                                 desc="The device is not in the list of devices used by this controller",
+                                 origin="write_attribute")
+            d = Failure(tango.DevFailed(err))
+        return d
 
     def get_state(self):
         with self.state_lock:
@@ -139,6 +154,36 @@ class FrogController(object):
         with self.state_lock:
             self.status = status_msg
 
+    def start_scan(self, scan_attr, start, stop, step, meas_attr):
+        self.logger.info("Starting scan of {0} from {1} to {2} measuring {3}".format(scan_attr.upper(),
+                                                                                     start, stop, meas_attr.upper()))
+        scan_pos = start
+        d0 = self.check_attribute(scan_attr, "motor", scan_pos, 0.1, 3.0, tolerance=scan_pos*1e-4, write=True)
+        # d1 = self.read_attribute(meas_attr, "spectrometer")
+        d0.addCallback(self.scan_arrive)
+        d0.addCallback(lambda _: self.read_attribute(meas_attr, "spectrometer"))
+        d0.addCallback(self.meas_scan)
+
+        return d0
+
+    def scan_arrive(self, result):
+        try:
+            self.scan_pos = result.value
+        except AttributeError:
+            self.logger.error("Scan arrive not returning attribute: {0}".format(result))
+            return False
+
+        self.logger.info("Scan arrive at pos {0}".format(self.scan_pos))
+        return result
+
+    def meas_scan(self, result):
+        try:
+            measure_value = result.value
+        except AttributeError:
+            self.logger.error("Measurement not returning attribute: {0}".format(result))
+            return False
+        self.logger.info("Measure at scan pos {0} result: {1}".format(self.scan_pos, measure_value))
+
 
 def test_cb(result):
     logger.debug("Returned {0}".format(result))
@@ -153,10 +198,20 @@ def test_timeout(result):
 
 
 if __name__ == "__main__":
-    fc = FrogController("sys/tg_test/1", "sys/tg_test/1")
+    fc = FrogController("sys/tg_test/1", "gunlaser/motors/zaber01")
     time.sleep(0)
-    sh = fs.FrogStateDispatcher(fc)
-    sh.start()
+    dc = fc.check_attribute("position", "motor", 7.17, 0.1, 0.5, 0.001, True)
+    dc.addCallbacks(test_cb, test_err)
+    time.sleep(1.0)
+    # dc.addCallback(lambda _: TangoTwisted.DelayedCallReactorless(2.0 + time.time(),
+    #                                                              fc.start_scan, ["position", 5, 10, 0.5,
+    #                                                                              "double_scalar"]))
+    scan = TangoTwisted.Scan(fc, "position", "motor", 5, 10, 0.5, "double_scalar", "spectrometer")
+    ds = scan.start_scan()
+    ds.addCallback(test_cb)
+
+    # sh = fs.FrogStateDispatcher(fc)
+    # sh.start()
 
     # da = fc.read_attribute("double_scalar", "motor")
     # da.addCallbacks(test_cb, test_err)
