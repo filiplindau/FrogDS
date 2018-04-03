@@ -17,6 +17,7 @@ import traceback
 from twisted.internet import reactor, defer, error
 import PyTango.futures as tangof
 import TangoTwisted
+import FrogController
 reload(TangoTwisted)
 from TangoTwisted import TangoAttributeFactory, defer_later
 
@@ -105,7 +106,7 @@ class FrogState(object):
     name = ""
 
     def __init__(self, controller):
-        self.controller = controller
+        self.controller = controller    # type: FrogController.FrogController
         self.logger = logging.getLogger("FrogState.{0}".format(self.name.upper()))
         # self.logger.name =
         self.logger.setLevel(logging.DEBUG)
@@ -184,9 +185,7 @@ class FrogStateDeviceConnect(FrogState):
         # self.logger.name = self.name
 
     def state_enter(self, prev_state):
-        self.logger.info("Starting state {0}".format(self.name.upper()))
-        with self.cond_obj:
-            self.running = True
+        FrogState.state_enter(self, prev_state)
         dl = list()
         for key, dev_name in self.controller.device_names.items():
             self.logger.debug("Connect to device {0}".format(dev_name))
@@ -215,6 +214,10 @@ class FrogStateDeviceConnect(FrogState):
 class FrogStateSetupAttributes(FrogState):
     """
     Setup attributes in the tango devices. Parameters stored in controller.setup_attr_params
+    Each key in setup_attr_params is a tuple of the form (device_name, attribute_name, value)
+
+    Device name is the name of the key in the controller.device_name dict (e.g. "motor", "spectrometer").
+
     setup_attr_params["speed"]: motor speed
     setup_attr_params["acceleration"]: motor acceleration
     setup_attr_params["exposure"]: spectrometer exposure time
@@ -229,11 +232,75 @@ class FrogStateSetupAttributes(FrogState):
         self.deferred_list = list()
 
     def state_enter(self, prev_state=None):
-        # Motor setup:
-        dm_1 = self.controller.read_attribute("state", "motor")
-        dm_2 = self.controller.read_attribute("microstepresolution", "motor")
-        dm_1.addCallback(dm_2)
+        FrogState.state_enter(self, prev_state)
+        # Go through all the attributes in the setup_attr_params dict and add
+        # do check_attribute with write to each.
+        # The deferreds are collected in a list that is added to a DeferredList
+        # When the DeferredList fires, the check_requirements method is called
+        # as a callback.
+        dl = list()
+        for key in self.controller.setup_attr_params:
+            attr = self.controller.setup_attr_params[key]
+            dev_name = self.controller.device_names[attr[0]]
+            try:
+                self.logger.debug("Setting attribute {0} on device {1} to {2}".format(attr[1].upper(),
+                                                                                      attr[0].upper(),
+                                                                                      attr[2]))
+            except AttributeError:
+                self.logger.debug("Setting attribute according to: {0}".format(attr))
+            # d = self.controller.write_attribute(attr[1], attr[0], attr[2])
+            d = self.controller.check_attribute(attr[1], dev_name, attr[2], period=0.3, timeout=2.0, write=True)
+            dl.append(d)
+        def_list = defer.DeferredList(dl)
+        self.deferred_list.append(def_list)
+        def_list.addCallbacks(self.check_requirements, self.state_error)
 
+    def check_requirements(self, result):
+        self.logger.info("Check requirements result: {0}".format(result))
+        self.next_state = "idle"
+        self.stop_run()
+        return "idle"
+
+    def state_error(self, err):
+        self.logger.error("Error: {0}".format(err))
+        self.controller.set_status("Error: {0}".format(err))
+        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+        self.next_state = "unknown"
+        self.stop_run()
+
+
+class FrogStateIdle(FrogState):
+    """
+    Wait for time for a new scan or a command. Parameters stored in controller.idle_params
+    idle_params["scan_interval"]: time in seconds between scans
+    """
+    name = "idle"
+
+    def __init__(self, controller):
+        FrogState.__init__(self, controller)
+        self.t0 = time.time()
+
+    def state_enter(self, prev_state=None):
+        FrogState.state_enter(self, prev_state)
+        t_delay = self.controller.idle_params["scan_interval"]
+        self.logger.debug("Waiting {0} s until starting next scan".format(t_delay))
+        self.t0 = time.time()
+        d = defer_later(t_delay, self.check_requirements)
+        d.addErrback(self.state_error)
+        self.deferred_list.append(d)
+
+    def check_requirements(self, result):
+        self.logger.info("Check requirements result: {0}".format(result))
+        self.next_state = "scan"
+        self.stop_run()
+        return "scan"
+
+    def state_error(self, err):
+        self.logger.error("Error: {0}".format(err))
+        self.controller.set_status("Error: {0}".format(err))
+        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+        self.next_state = "unknown"
+        self.stop_run()
 
 
 class FrogStateScan(FrogState):
@@ -249,6 +316,26 @@ class FrogStateScan(FrogState):
     def __init__(self, controller):
         FrogState.__init__(self, controller)
 
+    def state_enter(self, prev_state=None):
+        FrogState.state_enter(self, prev_state)
+        self.logger.debug("Starting scan")
+        d = defer_later(3.0, self.check_requirements)
+        d.addErrback(self.state_error)
+        self.deferred_list.append(d)
+
+    def check_requirements(self, result):
+        self.logger.info("Check requirements result: {0}".format(result))
+        self.next_state = "idle"
+        self.stop_run()
+        return "idle"
+
+    def state_error(self, err):
+        self.logger.error("Error: {0}".format(err))
+        self.controller.set_status("Error: {0}".format(err))
+        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+        self.next_state = "unknown"
+        self.stop_run()
+
 
 class FrogStateAnalyse(FrogState):
     """
@@ -261,18 +348,6 @@ class FrogStateAnalyse(FrogState):
     analyse_params["background_subtract"]: do background subtraction using start pos spectrum
     """
     name = "analyse"
-
-    def __init__(self, controller):
-        FrogState.__init__(self, controller)
-
-
-
-class FrogStateIdle(FrogState):
-    """
-    Wait for time for a new scan or a command. Parameters stored in controller.idle_params
-    idle_params["scan_interval"]: time in seconds between scans
-    """
-    name = "idle"
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
