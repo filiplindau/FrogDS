@@ -250,6 +250,7 @@ class FrogStateSetupAttributes(FrogState):
                 self.logger.debug("Setting attribute according to: {0}".format(attr))
             # d = self.controller.write_attribute(attr[1], attr[0], attr[2])
             d = self.controller.check_attribute(attr[1], dev_name, attr[2], period=0.3, timeout=2.0, write=True)
+            d.addCallback(self.attr_check_cb)
             dl.append(d)
         def_list = defer.DeferredList(dl)
         self.deferred_list.append(def_list)
@@ -267,6 +268,10 @@ class FrogStateSetupAttributes(FrogState):
         # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
         self.next_state = "unknown"
         self.stop_run()
+
+    def attr_check_cb(self, result):
+        self.logger.info("Check attribute result: {0}".format(result))
+        return result
 
 
 class FrogStateIdle(FrogState):
