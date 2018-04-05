@@ -953,6 +953,8 @@ class FrogAnalyse(object):
 
     def start_analysis(self):
         self.logger.info("Starting up frog analysis")
+        self.load_data()
+        self.preprocess()
         return self.d
 
     def load_data(self):
@@ -963,13 +965,13 @@ class FrogAnalyse(object):
         # The wavelengths should have been read earlier.
         if self.controller.wavelength_vector is None:
             self.logger.error("Wavelength vector not read")
-            f = Failure(AttributeError("Wavelength vector not read"))
-            self.d.errback(f)
+            fail = Failure(AttributeError("Wavelength vector not read"))
+            self.d.errback(fail)
             return
         w = self.controller.wavelength_vector
         self.time_data = t
         self.wavelength_data = w
-        self.scan_raw_data = np.array(scan_result[0])
+        self.scan_raw_data = np.array(scan_result[1])
         if self.time_data.shape[0] != self.scan_raw_data.shape[0]:
             err_s = "Time vector not matching scan_data dimension: {0} vs {1}".format(self.time_data.shape[0],
                                                                                       self.scan_raw_data.shape[0])
