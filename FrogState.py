@@ -296,6 +296,7 @@ class FrogStateIdle(FrogState):
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.info("self: {0}".format(self))
         self.next_state = "scan"
         self.stop_run()
         return "scan"
