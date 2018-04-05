@@ -270,7 +270,7 @@ class FrogStateSetupAttributes(FrogState):
         self.stop_run()
 
     def attr_check_cb(self, result):
-        self.logger.info("Check attribute result: {0}".format(result))
+        # self.logger.info("Check attribute result: {0}".format(result))
         return result
 
 
@@ -290,7 +290,7 @@ class FrogStateIdle(FrogState):
         t_delay = self.controller.idle_params["scan_interval"]
         self.logger.debug("Waiting {0} s until starting next scan".format(t_delay))
         self.t0 = time.time()
-        d = defer_later(t_delay, self.check_requirements)
+        d = defer_later(t_delay, self.check_requirements, ["dummy"])
         d.addErrback(self.state_error)
         self.deferred_list.append(d)
 
