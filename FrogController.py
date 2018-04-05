@@ -51,27 +51,33 @@ class FrogController(object):
         self.device_factory_dict = dict()
 
         self.setup_attr_params = dict()
-        self.setup_attr_params["speed"] = ("motor", "speed", 1.0)
+        self.setup_attr_params["speed"] = ("motor", "speed", 50.0)
         self.setup_attr_params["acceleration"] = ("motor", "acceleration", 36.0)
         self.setup_attr_params["step_per_unit"] = ("motor", "step_per_unit", 324.0)
+        self.setup_attr_params["wavelengths"] = ("spectrometer", "wavelengthvector", None)
 
         self.idle_params = dict()
-        self.idle_params["scan_interval"] = 10.0
+        self.idle_params["scan_interval"] = 5.0
 
         self.scan_params = dict()
-        self.scan_params["start_pos"] = 8.3
-        self.scan_params["step_size"] = 0.01
-        self.scan_params["end_pos"] = 8.8
+        self.scan_params["start_pos"] = 8.5
+        self.scan_params["step_size"] = 0.02
+        self.scan_params["end_pos"] = 8.9
         self.scan_params["average"] = 1
+        self.scan_params["scan_attr"] = "position"
+        # self.scan_params["dev_name"] = "motor"
 
         self.scan_result = None
+        self.wavelength_vector = None
 
         self.analyse_params = dict()
-        self.analyse_params["method"] = "SHG"
+        self.analyse_params["method"] = "GP"
+        self.analyse_params["algo"] = "SHG"
         self.analyse_params["size"] = 128
         self.analyse_params["iterations"] = 30
         self.analyse_params["roi"] = "full"
         self.analyse_params["threshold"] = 0.01
+        self.analyse_params["median_kernel"] = 1
         self.analyse_params["background_subtract"] = False
 
         self.logger = logging.getLogger("FrogController.Controller")
@@ -92,7 +98,7 @@ class FrogController(object):
     def read_attribute(self, name, device_name):
         self.logger.info("Read attribute \"{0}\" on \"{1}\"".format(name, device_name))
         if device_name in self.device_names:
-            factory = self.device_factory_dict[device_name]
+            factory = self.device_factory_dict[self.device_names[device_name]]
             d = factory.buildProtocol("read", name)
         else:
             self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factory_dict))
@@ -106,7 +112,7 @@ class FrogController(object):
     def write_attribute(self, name, device_name, data):
         self.logger.info("Write attribute \"{0}\" on \"{1}\"".format(name, device_name))
         if device_name in self.device_names:
-            factory = self.device_factory_dict[device_name]
+            factory = self.device_factory_dict[self.device_names[device_name]]
             d = factory.buildProtocol("write", name, data)
         else:
             self.logger.error("Device name {0} not found among {1}".format(device_name, self.device_factory_dict))
@@ -149,8 +155,8 @@ class FrogController(object):
         :return: Deferred that will fire depending on the result of the check
         """
         self.logger.info("Check attribute \"{0}\" on \"{1}\"".format(attr_name, dev_name))
-        if dev_name in self.device_factory_dict:
-            factory = self.device_factory_dict[dev_name]
+        if dev_name in self.device_names:
+            factory = self.device_factory_dict[self.device_names[dev_name]]
             d = factory.buildProtocol("check", attr_name, None, write=write, target_value=target_value,
                                       tolerance=tolerance, period=period, timeout=timeout)
         else:

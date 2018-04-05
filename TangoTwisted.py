@@ -12,6 +12,9 @@ from twisted.internet import reactor, defer, error
 from twisted.internet.protocol import Protocol, ClientFactory, Factory
 from twisted.python.failure import Failure, reflect
 import PyTango.futures as tangof
+import FrogController
+import numpy as np
+from scipy.signal import medfilt2d
 
 
 logger = logging.getLogger("TangoTwisted")
@@ -835,7 +838,7 @@ def test_cb2(result):
 class Scan(object):
     def __init__(self, controller, scan_attr_name, scan_dev_name, start_pos, stop_pos, step,
                  meas_attr_name, meas_dev_name):
-        self.controller = controller
+        self.controller = controller    # type: FrogController.FrogController
         self.scan_attr = scan_attr_name
         self.scan_dev = scan_dev_name
         self.start_pos = start_pos
@@ -863,7 +866,7 @@ class Scan(object):
         scan_pos = self.start_pos
         tol = self.step * 0.1
         d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
-                                             0.1, 3.0, tolerance=tol, write=True)
+                                             0.1, 10.0, tolerance=tol, write=True)
         d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
         # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
         # d0.addCallback(self.meas_scan)
@@ -877,6 +880,7 @@ class Scan(object):
         if scan_pos > self.stop_pos:
             self.logger.debug("Scan done!")
             self.d.callback([self.pos_data, self.meas_data])
+            return self.d
 
         d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
                                              0.1, 3.0, tolerance=tol, write=True)
@@ -914,3 +918,111 @@ class Scan(object):
 
     def scan_error_cb(self, err):
         self.logger.error("Scan error: {0}".format(err))
+        # Here we can handle the error if it is manageable or
+        # propagate the error to the calling callback chain:
+        if err.type in []:
+            pass
+        else:
+            self.d.errback(err)
+
+
+class FrogAnalyse(object):
+    """
+    Steps to take during analysis:
+
+    1. Load data
+    2. Pre-process data... threshold, background subtract, filter
+    3. Convert to t-f space
+    4. Run FROG algo
+
+    """
+    def __init__(self, controller):
+
+        self.controller = controller    # type: FrogController.FrogController
+
+        self.scan_raw_data = None
+        self.scan_proc_data = None
+        self.time_data = None
+        self.wavelength_data = None
+
+        self.logger = logging.getLogger("FrogController.Scan_{0}_{1}".format(self.scan_attr, self.meas_attr))
+        self.logger.setLevel(logging.DEBUG)
+
+        self.d = defer.Deferred()
+
+    def start_analysis(self):
+        self.logger.info("Starting up frog analysis")
+        return self.d
+
+    def load_data(self):
+        self.logger.info("Loading frog data from scan")
+        scan_result = self.controller.scan_result
+        pos = np.array(scan_result[0])  # Vector containing the motor positions during the scan
+        t = (pos-pos[0]) * 2 * 1e-3 / 299792458.0   # Assume position is in mm
+        # The wavelengths should have been read earlier.
+        if self.controller.wavelength_vector is None:
+            f = Failure(AttributeError("Wavelength vector not read"))
+            self.d.errback(f)
+            return
+        w = self.controller.wavelength_vector
+        self.time_data = t
+        self.wavelength_data = w
+        self.scan_raw_data = np.array(scan_result[0])
+        if self.time_data.shape[0] != self.scan_raw_data.shape[0]:
+            err_s = "Time vector not matching scan_data dimension: {0} vs {1}".format(self.time_data.shape[0],
+                                                                                      self.scan_raw_data.shape[0])
+            self.logger.error(err_s)
+            fail = Failure(AttributeError(err_s))
+            self.d.errback(fail)
+            return
+        if w.shape[0] != self.scan_raw_data.shape[1]:
+            err_s = "Wavelength vector not matching scan_data dimension: {0} vs {1}".format(w.shape[0],
+                                                                                            self.scan_raw_data.shape[0])
+            self.logger.error(err_s)
+            fail = Failure(AttributeError(err_s))
+            self.d.errback(fail)
+            return
+
+    def preprocess(self):
+        """
+        Preprocess data to improve the FROG inversion quality.
+        The most important part is the thresholding to isolate the data part
+        of the FROG trace.
+        We also do background subtraction, normalization, and filtering.
+        Thresholding is done after background subtraction.
+        :return:
+        """
+        self.logger.info("Preprocessing scan data")
+        if self.controller.analyse_params["background_subtract"] is True:
+            # Use first and last spectrum lines as background level.
+            # We should start and end the scan outside the trace anyway.
+            bkg0 = self.scan_raw_data[0, :]
+            bkg1 = self.scan_raw_data[-1, :]
+            bkg = (bkg0 + bkg1) / 2
+            # Tile background vector to a 2D matrix that can be subtracted from the data:
+            bkg_m = np.tile(bkg, (self.scan_raw_data.shape[0], 1))
+            proc_data = self.scan_raw_data - bkg_m
+            self.logger.debug("Background image subtractged")
+        else:
+            proc_data = np.copy(self.scan_raw_data)
+        # Normalization
+        proc_data = proc_data / proc_data.max()
+        self.logger.debug("Scan data normalized")
+        # Thresholding
+        thr = self.controller.analyse_params["threshold"]
+        np.clip(proc_data - thr, 0)     # In-place thresholding
+        self.logger.debug("Scan data thresholded to {0}".format(thr))
+        # Filtering
+        kernel = int(self.controller.analyse_params["media_kernel"])
+        if kernel > 1:
+            proc_data = medfilt2d(proc_data, kernel)
+        self.logger.debug("Scan data median filtered with kernel size {0}".format(kernel))
+        self.scan_proc_data = proc_data
+
+    def convert_data(self):
+        pass
+
+    def invert_frog_trace(self):
+        pass
+
+

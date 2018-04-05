@@ -215,6 +215,7 @@ class FrogStateSetupAttributes(FrogState):
     """
     Setup attributes in the tango devices. Parameters stored in controller.setup_attr_params
     Each key in setup_attr_params is a tuple of the form (device_name, attribute_name, value)
+    We also want read the wavelength vector for the spectrometer
 
     Device name is the name of the key in the controller.device_name dict (e.g. "motor", "spectrometer").
 
@@ -241,17 +242,29 @@ class FrogStateSetupAttributes(FrogState):
         dl = list()
         for key in self.controller.setup_attr_params:
             attr = self.controller.setup_attr_params[key]
-            dev_name = self.controller.device_names[attr[0]]
+            # dev_name = self.controller.device_names[attr[0]]
+            dev_name = attr[0]
             try:
                 self.logger.debug("Setting attribute {0} on device {1} to {2}".format(attr[1].upper(),
                                                                                       attr[0].upper(),
                                                                                       attr[2]))
             except AttributeError:
                 self.logger.debug("Setting attribute according to: {0}".format(attr))
-            # d = self.controller.write_attribute(attr[1], attr[0], attr[2])
-            d = self.controller.check_attribute(attr[1], dev_name, attr[2], period=0.3, timeout=2.0, write=True)
+            # If there is a value to check in attr[2] do a check_attribute,
+            # otherwise just read it. The value is stored in the factory object.
+            if attr[2] is not None:
+                d = self.controller.check_attribute(attr[1], dev_name, attr[2], period=0.3, timeout=2.0, write=True)
+            else:
+                d = self.controller.read_attribute(attr[1], dev_name)
             d.addCallback(self.attr_check_cb)
             dl.append(d)
+        # Get wavelength vector attribute:
+        spf = self.controller.device_factory_dict[self.controller.device_names["spectrometer"]]
+        dw = spf.get_attribute(self.controller.setup_attr_params["wavelengths"])
+        dw.addCallback(self.wavelengths_cb)
+        dl.append(dw)
+
+        # Create DeferredList that will fire when all the attributes are done:
         def_list = defer.DeferredList(dl)
         self.deferred_list.append(def_list)
         def_list.addCallbacks(self.check_requirements, self.state_error)
@@ -272,6 +285,13 @@ class FrogStateSetupAttributes(FrogState):
     def attr_check_cb(self, result):
         # self.logger.info("Check attribute result: {0}".format(result))
         return result
+
+    def wavelengths_cb(self, result):
+        try:
+            self.logger.info("Wavelength vector result {0}".format(result.vector))
+            self.controller.wavelength_vector = result.value
+        except AttributeError:
+            self.state_error("No wavelength vector")
 
 
 class FrogStateIdle(FrogState):
@@ -315,6 +335,8 @@ class FrogStateScan(FrogState):
     scan_params["start_pos"]: initial motor position
     scan_params["step_size"]: motor step size
     scan_params["end_pos"]: motor end position
+    # scan_params["dev_name"]: device name that runs the scan
+    scan_params["scan_attr"]: name of attribute to scan
     scan_params["average"]: number of averages in each position
     """
     name = "scan"
@@ -324,11 +346,13 @@ class FrogStateScan(FrogState):
 
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
-        self.logger.debug("Starting scan")
+        dev_name = "motor"
+        attr_name = self.controller.scan_params["scan_attr"]
         start_pos = self.controller.scan_params["start_pos"]
         end_pos = self.controller.scan_params["end_pos"]
         step_size = self.controller.scan_params["step_size"]
-        scan = TangoTwisted.Scan(self.controller, "position", "motor", start_pos, end_pos, step_size,
+        self.logger.debug("Starting scan of {0} on {1}".format(attr_name, dev_name))
+        scan = TangoTwisted.Scan(self.controller, attr_name, dev_name, start_pos, end_pos, step_size,
                                  "spectrum", "spectrometer")
         d = scan.start_scan()
         d.addCallbacks(self.check_requirements, self.state_error)
@@ -363,11 +387,13 @@ class FrogStateAnalyse(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.frog_analysis = None
 
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
         self.logger.debug("Starting FROG analysis")
-        d = defer_later(3.0, self.check_requirements)
+        self.frog_analysis = TangoTwisted.FrogAnalyse(self.controller)
+        d = self.frog_analysis.start_analysis()
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
