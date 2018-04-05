@@ -260,7 +260,8 @@ class FrogStateSetupAttributes(FrogState):
             dl.append(d)
         # Get wavelength vector attribute:
         spf = self.controller.device_factory_dict[self.controller.device_names["spectrometer"]]
-        dw = spf.get_attribute(self.controller.setup_attr_params["wavelengths"])
+        attr_name = self.controller.setup_attr_params["wavelengths"][1]
+        dw = spf.get_attribute(attr_name)
         dw.addCallbacks(self.wavelengths_cb, self.wavelengths_eb)
         self.controller.dw = dw
         self.logger.debug("get attribute wavelengths {0}".format(dw))
@@ -328,7 +329,7 @@ class FrogStateIdle(FrogState):
         self.logger.info("Check requirements result: {0}".format(result))
         self.logger.info("self: {0}".format(self))
         self.next_state = "scan"
-        # self.stop_run()
+        self.stop_run()
         return "scan"
 
     def state_error(self, err):

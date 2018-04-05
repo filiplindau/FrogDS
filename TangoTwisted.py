@@ -295,11 +295,11 @@ class TangoAttributeFactory(Factory):
 
     def get_attribute(self, name):
         if name in self.attribute_dict:
-            self.logger.debug("Attribute already read. Retrieve from dictionary.")
+            self.logger.debug("Attribute {0} already read. Retrieve from dictionary.".format(name))
             d = defer.Deferred()
             d.callback(self.attribute_dict[name])
         else:
-            self.logger.debug("Attribute not in dictionary, retrieve it from device")
+            self.logger.debug("Attribute {0} not in dictionary, retrieve it from device".format(name))
             d = self.buildProtocol("read", name)
         return d
 
