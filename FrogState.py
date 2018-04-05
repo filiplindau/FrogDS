@@ -324,15 +324,21 @@ class FrogStateScan(FrogState):
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
         self.logger.debug("Starting scan")
-        d = defer_later(3.0, self.check_requirements)
-        d.addErrback(self.state_error)
+        start_pos = self.controller.scan_params["start_pos"]
+        end_pos = self.controller.scan_params["end_pos"]
+        step_size = self.controller.scan_params["step_size"]
+        scan = TangoTwisted.Scan(self.controller, "position", "motor", start_pos, end_pos, step_size,
+                                 "spectrum", "spectrometer")
+        d = scan.start_scan()
+        d.addCallbacks(self.check_requirements, self.state_error)
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
-        self.next_state = "idle"
+        self.controller.scan_result = result
+        self.next_state = "analyse"
         self.stop_run()
-        return "idle"
+        return "analyse"
 
     def state_error(self, err):
         self.logger.error("Error: {0}".format(err))
@@ -356,6 +362,18 @@ class FrogStateAnalyse(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+
+    def state_enter(self, prev_state=None):
+        FrogState.state_enter(self, prev_state)
+        self.logger.debug("Starting FROG analysis")
+        d = defer_later(3.0, self.check_requirements)
+        self.deferred_list.append(d)
+
+    def check_requirements(self, result):
+        self.logger.info("Check requirements result: {0}".format(result))
+        self.next_state = "idle"
+        self.stop_run()
+        return "idle"
 
 
 class FrogStateFault(FrogState):

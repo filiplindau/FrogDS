@@ -64,6 +64,8 @@ class FrogController(object):
         self.scan_params["end_pos"] = 8.8
         self.scan_params["average"] = 1
 
+        self.scan_result = None
+
         self.analyse_params = dict()
         self.analyse_params["method"] = "SHG"
         self.analyse_params["size"] = 128
