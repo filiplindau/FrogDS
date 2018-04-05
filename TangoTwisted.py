@@ -216,7 +216,7 @@ class TangoAttributeFactory(Factory):
         self.attribute_dict = dict()
 
         self.logger = logging.getLogger("FrogController.Factory_{0}".format(device_name))
-        self.logger.setLevel(logging.CRITICAL)
+        self.logger.setLevel(logging.DEBUG)
 
     def startFactory(self):
         self.logger.info("Starting TangoAttributeFactory")
@@ -295,6 +295,7 @@ class TangoAttributeFactory(Factory):
 
     def get_attribute(self, name):
         if name in self.attribute_dict:
+            self.logger.debug("Attribute already read. Retrieve from dictionary.")
             d = defer.Deferred()
             d.callback(self.attribute_dict[name])
         else:
@@ -945,7 +946,7 @@ class FrogAnalyse(object):
         self.time_data = None
         self.wavelength_data = None
 
-        self.logger = logging.getLogger("FrogController.Scan_{0}_{1}".format(self.scan_attr, self.meas_attr))
+        self.logger = logging.getLogger("FrogController.Analysis")
         self.logger.setLevel(logging.DEBUG)
 
         self.d = defer.Deferred()
@@ -961,6 +962,7 @@ class FrogAnalyse(object):
         t = (pos-pos[0]) * 2 * 1e-3 / 299792458.0   # Assume position is in mm
         # The wavelengths should have been read earlier.
         if self.controller.wavelength_vector is None:
+            self.logger.error("Wavelength vector not read")
             f = Failure(AttributeError("Wavelength vector not read"))
             self.d.errback(f)
             return

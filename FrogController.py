@@ -61,8 +61,8 @@ class FrogController(object):
 
         self.scan_params = dict()
         self.scan_params["start_pos"] = 8.5
-        self.scan_params["step_size"] = 0.02
-        self.scan_params["end_pos"] = 8.9
+        self.scan_params["step_size"] = 0.01
+        self.scan_params["end_pos"] = 8.8
         self.scan_params["average"] = 1
         self.scan_params["scan_attr"] = "position"
         # self.scan_params["dev_name"] = "motor"

@@ -256,12 +256,15 @@ class FrogStateSetupAttributes(FrogState):
                 d = self.controller.check_attribute(attr[1], dev_name, attr[2], period=0.3, timeout=2.0, write=True)
             else:
                 d = self.controller.read_attribute(attr[1], dev_name)
-            d.addCallback(self.attr_check_cb)
+            d.addCallbacks(self.attr_check_cb, self.attr_check_eb)
             dl.append(d)
         # Get wavelength vector attribute:
         spf = self.controller.device_factory_dict[self.controller.device_names["spectrometer"]]
         dw = spf.get_attribute(self.controller.setup_attr_params["wavelengths"])
-        dw.addCallback(self.wavelengths_cb)
+        dw.addCallbacks(self.wavelengths_cb, self.wavelengths_eb)
+        self.controller.dw = dw
+        self.logger.debug("get attribute wavelengths {0}".format(dw))
+        self.logger.debug("deferred called state: {0}".format(dw.called))
         dl.append(dw)
 
         # Create DeferredList that will fire when all the attributes are done:
@@ -273,7 +276,7 @@ class FrogStateSetupAttributes(FrogState):
         self.logger.info("Check requirements result: {0}".format(result))
         self.next_state = "idle"
         self.stop_run()
-        return "idle"
+        return result
 
     def state_error(self, err):
         self.logger.error("Error: {0}".format(err))
@@ -286,12 +289,19 @@ class FrogStateSetupAttributes(FrogState):
         # self.logger.info("Check attribute result: {0}".format(result))
         return result
 
+    def attr_check_eb(self, err):
+        self.logger.error("Check attribute ERROR: {0}".format(error))
+        return err
+
     def wavelengths_cb(self, result):
-        try:
-            self.logger.info("Wavelength vector result {0}".format(result.vector))
-            self.controller.wavelength_vector = result.value
-        except AttributeError:
-            self.state_error("No wavelength vector")
+        self.logger.debug("Result: {0}".format(result))
+        self.logger.info("Wavelength vector result {0}".format(result.value))
+        self.controller.wavelength_vector = result.value
+        return result
+
+    def wavelengths_eb(self, err):
+        self.logger.info("Wavelength vector ERROR: {0}".format(err))
+        return err
 
 
 class FrogStateIdle(FrogState):
@@ -318,7 +328,7 @@ class FrogStateIdle(FrogState):
         self.logger.info("Check requirements result: {0}".format(result))
         self.logger.info("self: {0}".format(self))
         self.next_state = "scan"
-        self.stop_run()
+        # self.stop_run()
         return "scan"
 
     def state_error(self, err):
