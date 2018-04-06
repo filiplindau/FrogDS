@@ -19,6 +19,12 @@ import TangoTwisted
 from TangoTwisted import TangoAttributeFactory, TangoAttributeProtocol, \
     LoopingCall, DeferredCondition, ClockReactorless, defer_later
 import FrogState as fs
+import sys, os, inspect
+currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+parentdir = os.path.dirname(currentdir)
+sys.path.insert(0, os.path.join(parentdir, "Frog\src"))
+import FrogCalculationSimpleGP as FrogCalculation
+
 reload(fs)
 reload(TangoTwisted)
 
@@ -69,11 +75,13 @@ class FrogController(object):
 
         self.scan_result = None
         self.wavelength_vector = None
+        self.frog_calc = FrogCalculation.FrogCalculation()
 
         self.analyse_params = dict()
         self.analyse_params["method"] = "GP"
         self.analyse_params["algo"] = "SHG"
         self.analyse_params["size"] = 128
+        self.analyse_params["dt"] = None
         self.analyse_params["iterations"] = 30
         self.analyse_params["roi"] = "full"
         self.analyse_params["threshold"] = 0.01

@@ -15,6 +15,11 @@ import PyTango.futures as tangof
 import FrogController
 import numpy as np
 from scipy.signal import medfilt2d
+# import sys, os, inspect
+# currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+# parentdir = os.path.dirname(currentdir)
+# sys.path.insert(0, os.path.join(parentdir, "Frog\src"))
+import FrogCalculationSimpleGP as FrogCalculation
 
 
 logger = logging.getLogger("TangoTwisted")
@@ -216,7 +221,7 @@ class TangoAttributeFactory(Factory):
         self.attribute_dict = dict()
 
         self.logger = logging.getLogger("FrogController.Factory_{0}".format(device_name))
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.CRITICAL)
 
     def startFactory(self):
         self.logger.info("Starting TangoAttributeFactory")
@@ -955,6 +960,7 @@ class FrogAnalyse(object):
         self.logger.info("Starting up frog analysis")
         self.load_data()
         self.preprocess()
+        self.convert_data()
         return self.d
 
     def load_data(self):
@@ -1014,17 +1020,43 @@ class FrogAnalyse(object):
         self.logger.debug("Scan data normalized")
         # Thresholding
         thr = self.controller.analyse_params["threshold"]
-        np.clip(proc_data - thr, 0)     # In-place thresholding
+        np.clip(proc_data - thr, 0, None)     # In-place thresholding
         self.logger.debug("Scan data thresholded to {0}".format(thr))
         # Filtering
-        kernel = int(self.controller.analyse_params["media_kernel"])
+        kernel = int(self.controller.analyse_params["median_kernel"])
         if kernel > 1:
             proc_data = medfilt2d(proc_data, kernel)
         self.logger.debug("Scan data median filtered with kernel size {0}".format(kernel))
         self.scan_proc_data = proc_data
 
     def convert_data(self):
-        pass
+        """
+        Create the reference intensity frog trace for the algorithm.
+        We need the wavelength range and the time range.
+        Also the size of the transform is required.
+        :return:
+        """
+        self.logger.info("Converting scan data for FROG algorithm")
+        tau_mean = (self.time_data[-1] + self.time_data[0]) / 2
+        tau_start = self.time_data[0] - tau_mean
+        tau_stop = self.time_data[-1] - tau_mean
+        l_start = self.wavelength_data[0]
+        l_stop = self.wavelength_data[-1]
+        l0 = (l_stop + l_start) / 2
+        n = self.controller.analyse_params["size"]
+        dt_t = np.abs(tau_stop - tau_start) / n
+        dt_l = np.abs(1.0 / (1.0 / l_start - 1.0 / l_stop) / 299792458.0)
+        self.logger.debug("dt_t: {0}, dt_l: {1}".format(dt_t, dt_l))
+        dt_p = self.controller.analyse_params["dt"]
+        if dt_p is None:
+            dt = dt_t
+        else:
+            dt = dt_p
+        self.controller.frog_calc.init_pulsefield_random(n, dt, l0)
+        self.logger.debug("Pulse field initialized with n={0}, dt={1} fs, l0={2} nm".format(n, dt*1e15, l0*1e9))
+        self.controller.frog_calc.condition_frog_trace2(self.scan_proc_data, l_start, l_stop,
+                                                        tau_start, tau_stop, n, thr=0)
+        self.logger.debug("Frog trace conditioned to t-f space")
 
     def invert_frog_trace(self):
         pass
