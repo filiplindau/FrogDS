@@ -12,15 +12,10 @@ from twisted.internet import reactor, defer, error
 from twisted.internet.protocol import Protocol, ClientFactory, Factory
 from twisted.python.failure import Failure, reflect
 import PyTango.futures as tangof
-import FrogController
-import numpy as np
-from scipy.signal import medfilt2d
 # import sys, os, inspect
 # currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 # parentdir = os.path.dirname(currentdir)
 # sys.path.insert(0, os.path.join(parentdir, "Frog\src"))
-import FrogCalculationSimpleGP as FrogCalculation
-
 
 logger = logging.getLogger("TangoTwisted")
 logger.setLevel(logging.DEBUG)
@@ -836,229 +831,38 @@ class ClockReactorless(object):
             self.advance(amount)
 
 
+def defer_to_thread(f, *args, **kwargs):
+    """
+    Run a function in a thread and return the result as a Deferred.
+    @param f: The function to call.
+    @param *args: positional arguments to pass to f.
+    @param **kwargs: keyword arguments to pass to f.
+    @return: A Deferred which fires a callback with the result of f,
+    or an errback with a L{twisted.python.failure.Failure} if f throws
+    an exception.
+    """
+    def run_thread(df, func, *f_args, **f_kwargs):
+        try:
+            logger.debug("Calling function {0} in thread.".format(func))
+            result = func(*f_args, **f_kwargs)
+            logger.debug("Thread deferred function returned {0}".format(result))
+            df.callback(result)
+        except Exception as e:
+            df.errback(e)
+    logger.info("Deferring function {0} to thread.".format(f))
+    d = defer.Deferred()
+    rt_args = (d, f) + args
+    t = threading.Thread(target=run_thread, args=rt_args, kwargs=kwargs)
+    t.start()
+    return d
+
+
 def test_cb2(result):
     logger.info("Test CB2 result: {0}".format(result))
     return result
 
 
-class Scan(object):
-    def __init__(self, controller, scan_attr_name, scan_dev_name, start_pos, stop_pos, step,
-                 meas_attr_name, meas_dev_name):
-        self.controller = controller    # type: FrogController.FrogController
-        self.scan_attr = scan_attr_name
-        self.scan_dev = scan_dev_name
-        self.start_pos = start_pos
-        self.stop_pos = stop_pos
-        self.step = step
-        self.meas_attr = meas_attr_name
-        self.meas_dev = meas_dev_name
-
-        self.current_pos = None
-        self.pos_data = []
-        self.meas_data = []
-
-        self.logger = logging.getLogger("FrogController.Scan_{0}_{1}".format(self.scan_attr, self.meas_attr))
-        self.logger.setLevel(logging.DEBUG)
-
-        self.d = defer.Deferred()
-
-        # Add errback handling!
-
-    def start_scan(self):
-        self.logger.info("Starting scan of {0} from {1} to {2} measuring {3}".format(self.scan_attr.upper(),
-                                                                                     self.start_pos,
-                                                                                     self.stop_pos,
-                                                                                     self.meas_attr.upper()))
-        scan_pos = self.start_pos
-        tol = self.step * 0.1
-        d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
-                                             0.1, 10.0, tolerance=tol, write=True)
-        d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
-        # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
-        # d0.addCallback(self.meas_scan)
-
-        return self.d
-
-    def scan_step(self):
-        self.logger.info("Scan step")
-        tol = self.step * 0.1
-        scan_pos = self.current_pos + self.step
-        if scan_pos > self.stop_pos:
-            self.logger.debug("Scan done!")
-            self.d.callback([self.pos_data, self.meas_data])
-            return self.d
-
-        d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
-                                             0.1, 3.0, tolerance=tol, write=True)
-        d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
-        # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
-        # d0.addCallback(self.meas_scan)
-        return d0
-
-    def scan_arrive(self, result):
-        try:
-            self.current_pos = result.value
-        except AttributeError:
-            self.logger.error("Scan arrive not returning attribute: {0}".format(result))
-            return False
-
-        self.logger.info("Scan arrive at pos {0}".format(self.current_pos))
-        d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
-        # d0.addCallback(test_cb2)
-        d0.addCallbacks(self.meas_scan, self.scan_error_cb)
-        return True
-
-    def meas_scan(self, result):
-        self.logger.info("Meas scan result: {0}".format(result.value))
-        measure_value = result.value
-        # try:
-        #     measure_value = result.value
-        # except AttributeError:
-        #     self.logger.error("Measurement not returning attribute: {0}".format(result))
-        #     return False
-        self.logger.info("Measure at scan pos {0} result: {1}".format(self.current_pos, measure_value))
-        self.meas_data.append(measure_value)
-        self.pos_data.append(self.current_pos)
-        self.scan_step()
-        return True
-
-    def scan_error_cb(self, err):
-        self.logger.error("Scan error: {0}".format(err))
-        # Here we can handle the error if it is manageable or
-        # propagate the error to the calling callback chain:
-        if err.type in []:
-            pass
-        else:
-            self.d.errback(err)
 
 
-class FrogAnalyse(object):
-    """
-    Steps to take during analysis:
-
-    1. Load data
-    2. Pre-process data... threshold, background subtract, filter
-    3. Convert to t-f space
-    4. Run FROG algo
-
-    """
-    def __init__(self, controller):
-
-        self.controller = controller    # type: FrogController.FrogController
-
-        self.scan_raw_data = None
-        self.scan_proc_data = None
-        self.time_data = None
-        self.wavelength_data = None
-
-        self.logger = logging.getLogger("FrogController.Analysis")
-        self.logger.setLevel(logging.DEBUG)
-
-        self.d = defer.Deferred()
-
-    def start_analysis(self):
-        self.logger.info("Starting up frog analysis")
-        self.load_data()
-        self.preprocess()
-        self.convert_data()
-        return self.d
-
-    def load_data(self):
-        self.logger.info("Loading frog data from scan")
-        scan_result = self.controller.scan_result
-        pos = np.array(scan_result[0])  # Vector containing the motor positions during the scan
-        t = (pos-pos[0]) * 2 * 1e-3 / 299792458.0   # Assume position is in mm
-        # The wavelengths should have been read earlier.
-        if self.controller.wavelength_vector is None:
-            self.logger.error("Wavelength vector not read")
-            fail = Failure(AttributeError("Wavelength vector not read"))
-            self.d.errback(fail)
-            return
-        w = self.controller.wavelength_vector
-        self.time_data = t
-        self.wavelength_data = w
-        self.scan_raw_data = np.array(scan_result[1])
-        if self.time_data.shape[0] != self.scan_raw_data.shape[0]:
-            err_s = "Time vector not matching scan_data dimension: {0} vs {1}".format(self.time_data.shape[0],
-                                                                                      self.scan_raw_data.shape[0])
-            self.logger.error(err_s)
-            fail = Failure(AttributeError(err_s))
-            self.d.errback(fail)
-            return
-        if w.shape[0] != self.scan_raw_data.shape[1]:
-            err_s = "Wavelength vector not matching scan_data dimension: {0} vs {1}".format(w.shape[0],
-                                                                                            self.scan_raw_data.shape[0])
-            self.logger.error(err_s)
-            fail = Failure(AttributeError(err_s))
-            self.d.errback(fail)
-            return
-
-    def preprocess(self):
-        """
-        Preprocess data to improve the FROG inversion quality.
-        The most important part is the thresholding to isolate the data part
-        of the FROG trace.
-        We also do background subtraction, normalization, and filtering.
-        Thresholding is done after background subtraction.
-        :return:
-        """
-        self.logger.info("Preprocessing scan data")
-        if self.controller.analyse_params["background_subtract"] is True:
-            # Use first and last spectrum lines as background level.
-            # We should start and end the scan outside the trace anyway.
-            bkg0 = self.scan_raw_data[0, :]
-            bkg1 = self.scan_raw_data[-1, :]
-            bkg = (bkg0 + bkg1) / 2
-            # Tile background vector to a 2D matrix that can be subtracted from the data:
-            bkg_m = np.tile(bkg, (self.scan_raw_data.shape[0], 1))
-            proc_data = self.scan_raw_data - bkg_m
-            self.logger.debug("Background image subtractged")
-        else:
-            proc_data = np.copy(self.scan_raw_data)
-        # Normalization
-        proc_data = proc_data / proc_data.max()
-        self.logger.debug("Scan data normalized")
-        # Thresholding
-        thr = self.controller.analyse_params["threshold"]
-        np.clip(proc_data - thr, 0, None)     # In-place thresholding
-        self.logger.debug("Scan data thresholded to {0}".format(thr))
-        # Filtering
-        kernel = int(self.controller.analyse_params["median_kernel"])
-        if kernel > 1:
-            proc_data = medfilt2d(proc_data, kernel)
-        self.logger.debug("Scan data median filtered with kernel size {0}".format(kernel))
-        self.scan_proc_data = proc_data
-
-    def convert_data(self):
-        """
-        Create the reference intensity frog trace for the algorithm.
-        We need the wavelength range and the time range.
-        Also the size of the transform is required.
-        :return:
-        """
-        self.logger.info("Converting scan data for FROG algorithm")
-        tau_mean = (self.time_data[-1] + self.time_data[0]) / 2
-        tau_start = self.time_data[0] - tau_mean
-        tau_stop = self.time_data[-1] - tau_mean
-        l_start = self.wavelength_data[0]
-        l_stop = self.wavelength_data[-1]
-        l0 = (l_stop + l_start) / 2
-        n = self.controller.analyse_params["size"]
-        dt_t = np.abs(tau_stop - tau_start) / n
-        dt_l = np.abs(1.0 / (1.0 / l_start - 1.0 / l_stop) / 299792458.0)
-        self.logger.debug("dt_t: {0}, dt_l: {1}".format(dt_t, dt_l))
-        dt_p = self.controller.analyse_params["dt"]
-        if dt_p is None:
-            dt = dt_t
-        else:
-            dt = dt_p
-        self.controller.frog_calc.init_pulsefield_random(n, dt, l0)
-        self.logger.debug("Pulse field initialized with n={0}, dt={1} fs, l0={2} nm".format(n, dt*1e15, l0*1e9))
-        self.controller.frog_calc.condition_frog_trace2(self.scan_proc_data, l_start, l_stop,
-                                                        tau_start, tau_stop, n, thr=0)
-        self.logger.debug("Frog trace conditioned to t-f space")
-
-    def invert_frog_trace(self):
-        pass
 
 

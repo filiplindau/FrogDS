@@ -19,6 +19,7 @@ import PyTango.futures as tangof
 import TangoTwisted
 import FrogController
 reload(TangoTwisted)
+reload(FrogController)
 from TangoTwisted import TangoAttributeFactory, defer_later
 
 
@@ -60,7 +61,7 @@ class FrogStateDispatcher(object):
         while self.stop_flag is False:
             # Determine which state object to construct:
             try:
-                state_name = self.get_state()
+                state_name = self.get_state_name()
                 self.logger.debug("New state: {0}".format(state_name.upper()))
                 self._state_obj = self.statehandler_dict[state_name](self.controller)
             except KeyError:
@@ -78,6 +79,9 @@ class FrogStateDispatcher(object):
         self._state_thread = None
 
     def get_state(self):
+        return self._state_obj
+
+    def get_state_name(self):
         return self.current_state
 
     def set_state(self, state_name):
@@ -144,6 +148,18 @@ class FrogState(object):
         self.next_state = None
         return result
 
+    def check_message(self, msg):
+        """
+        Check message with condition object released and take appropriate action.
+        The condition object is released already in the send_message function.
+
+        -- This could be a message queue if needed...
+
+        :param msg:
+        :return:
+        """
+        pass
+
     def state_error(self, err):
         self.logger.error("Error {0} in state {1}".format(err, self.name.upper()))
 
@@ -154,7 +170,10 @@ class FrogState(object):
         return self.name
 
     def send_message(self, msg):
-        pass
+        self.logger.info("Message {0} received".format(msg))
+        with self.cond_obj:
+            self.cond_obj.notify_all()
+            self.check_message(msg)
 
     def stop_run(self):
         self.logger.info("Notify condition to stop run")
@@ -264,8 +283,6 @@ class FrogStateSetupAttributes(FrogState):
         dw = spf.get_attribute(attr_name)
         dw.addCallbacks(self.wavelengths_cb, self.wavelengths_eb)
         self.controller.dw = dw
-        self.logger.debug("get attribute wavelengths {0}".format(dw))
-        self.logger.debug("deferred called state: {0}".format(dw.called))
         dl.append(dw)
 
         # Create DeferredList that will fire when all the attributes are done:
@@ -274,7 +291,8 @@ class FrogStateSetupAttributes(FrogState):
         def_list.addCallbacks(self.check_requirements, self.state_error)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.info("Check requirements")
+        # self.logger.info("Check requirements result: {0}".format(result))
         self.next_state = "idle"
         self.stop_run()
         return result
@@ -295,7 +313,6 @@ class FrogStateSetupAttributes(FrogState):
         return err
 
     def wavelengths_cb(self, result):
-        self.logger.debug("Result: {0}".format(result))
         self.logger.info("Wavelength vector result {0}".format(result.value))
         self.controller.wavelength_vector = result.value
         return result
@@ -321,23 +338,36 @@ class FrogStateIdle(FrogState):
         t_delay = self.controller.idle_params["scan_interval"]
         self.logger.debug("Waiting {0} s until starting next scan".format(t_delay))
         self.t0 = time.time()
-        d = defer_later(t_delay, self.check_requirements, ["dummy"])
+        # d = defer_later(t_delay, self.check_requirements, ["dummy"])
+        d = defer.Deferred()
         d.addErrback(self.state_error)
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
-        self.logger.info("self: {0}".format(self))
         self.next_state = "scan"
         self.stop_run()
         return "scan"
 
     def state_error(self, err):
         self.logger.error("Error: {0}".format(err))
-        self.controller.set_status("Error: {0}".format(err))
-        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
-        self.next_state = "unknown"
-        self.stop_run()
+        if err.type == defer.CancelledError:
+            self.logger.info("Cancelled error, ignore")
+        else:
+            self.controller.set_status("Error: {0}".format(err))
+            # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+            self.next_state = "unknown"
+            self.stop_run()
+
+    def check_message(self, msg):
+        if msg == "scan":
+            self.logger.debug("Message scan... set next state and stop.")
+            self.next_state = "scan"
+            self.stop_run()
+        elif msg == "analyse":
+            self.logger.debug("Message analyse... set next state and stop.")
+            self.next_state = "analyse"
+            self.stop_run()
 
 
 class FrogStateScan(FrogState):
@@ -363,15 +393,16 @@ class FrogStateScan(FrogState):
         end_pos = self.controller.scan_params["end_pos"]
         step_size = self.controller.scan_params["step_size"]
         self.logger.debug("Starting scan of {0} on {1}".format(attr_name, dev_name))
-        scan = TangoTwisted.Scan(self.controller, attr_name, dev_name, start_pos, end_pos, step_size,
-                                 "spectrum", "spectrometer")
+        scan = FrogController.Scan(self.controller, attr_name, dev_name, start_pos, end_pos, step_size,
+                                   "spectrum", "spectrometer")
         d = scan.start_scan()
         d.addCallbacks(self.check_requirements, self.state_error)
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
-        self.controller.scan_result = result
+        self.controller.scan_result["pos_data"] = result[0]
+        self.controller.scan_result["scan_data"] = result[1]
         self.next_state = "analyse"
         self.stop_run()
         return "analyse"
@@ -403,15 +434,23 @@ class FrogStateAnalyse(FrogState):
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
         self.logger.debug("Starting FROG analysis")
-        self.frog_analysis = TangoTwisted.FrogAnalyse(self.controller)
+        self.frog_analysis = FrogController.FrogAnalyse(self.controller)
         d = self.frog_analysis.start_analysis()
         self.deferred_list.append(d)
+        d.addCallbacks(self.check_requirements, self.state_error)
 
     def check_requirements(self, result):
         self.logger.info("Check requirements result: {0}".format(result))
         self.next_state = "idle"
         self.stop_run()
         return "idle"
+
+    def state_error(self, err):
+        self.logger.error("Error: {0}".format(err))
+        self.controller.set_status("Error: {0}".format(err))
+        # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
+        self.next_state = "unknown"
+        self.stop_run()
 
 
 class FrogStateFault(FrogState):
@@ -457,3 +496,10 @@ def test_cb(result):
 
 def test_err(err):
     logger.error("ERROR Returned {0}".format(err))
+
+
+if __name__ == "__main__":
+    fc = FrogController.FrogController("gunlaser/devices/spectrometer_frog", "gunlaser/motors/zaber01")
+
+    sh = FrogStateDispatcher(fc)
+    sh.start()
