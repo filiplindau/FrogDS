@@ -93,6 +93,10 @@ class FrogStateDispatcher(object):
             logger.debug("New state unknown. Got {0}, setting to UNKNOWN".format(state_name))
             self.current_state = "unknown"
 
+    def send_command(self, msg):
+        self.logger.info("Sending command {0} to state {1}".format(msg, self.current_state))
+        self._state_obj.check_message(msg)
+
     def stop(self):
         self.logger.info("Stop state handler thread")
         self._state_obj.stop_run()
@@ -205,6 +209,7 @@ class FrogStateDeviceConnect(FrogState):
 
     def state_enter(self, prev_state):
         FrogState.state_enter(self, prev_state)
+        self.controller.set_status("Connecting to motor and spectrometer devices.")
         dl = list()
         for key, dev_name in self.controller.device_names.items():
             self.logger.debug("Connect to device {0}".format(dev_name))
@@ -253,6 +258,7 @@ class FrogStateSetupAttributes(FrogState):
 
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
+        self.controller.set_status("Setting up device parameters on motor and spectrometer.")
         # Go through all the attributes in the setup_attr_params dict and add
         # do check_attribute with write to each.
         # The deferreds are collected in a list that is added to a DeferredList
@@ -336,10 +342,17 @@ class FrogStateIdle(FrogState):
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
         t_delay = self.controller.idle_params["scan_interval"]
-        self.logger.debug("Waiting {0} s until starting next scan".format(t_delay))
-        self.t0 = time.time()
-        # d = defer_later(t_delay, self.check_requirements, ["dummy"])
-        d = defer.Deferred()
+        paused = self.controller.idle_params["paused"]
+        if paused is False:
+            self.logger.debug("Waiting {0} s until starting next scan".format(t_delay))
+            self.controller.set_status("Idle. Scan time interval {0} s.".format(t_delay))
+            self.t0 = time.time()
+            d = defer_later(t_delay, self.check_requirements, ["dummy"])
+            # d = defer.Deferred()
+        else:
+            self.logger.debug("Pausing next scan")
+            self.controller.set_status("Idle. Scanning paused.")
+            d = defer.Deferred()
         d.addErrback(self.state_error)
         self.deferred_list.append(d)
 
@@ -362,12 +375,23 @@ class FrogStateIdle(FrogState):
     def check_message(self, msg):
         if msg == "scan":
             self.logger.debug("Message scan... set next state and stop.")
+            self.controller.idle_params["paused"] = False
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
             self.next_state = "scan"
             self.stop_run()
         elif msg == "analyse":
             self.logger.debug("Message analyse... set next state and stop.")
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
             self.next_state = "analyse"
             self.stop_run()
+        elif msg == "pause":
+            self.logger.debug("Message pause")
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
+            self.controller.idle_params["paused"] = True
+            self.controller.set_status("Idle. Scanning paused.")
 
 
 class FrogStateScan(FrogState):
@@ -384,6 +408,7 @@ class FrogStateScan(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.logger.setLevel(logging.INFO)
 
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
@@ -392,7 +417,8 @@ class FrogStateScan(FrogState):
         start_pos = self.controller.scan_params["start_pos"]
         end_pos = self.controller.scan_params["end_pos"]
         step_size = self.controller.scan_params["step_size"]
-        self.logger.debug("Starting scan of {0} on {1}".format(attr_name, dev_name))
+        self.logger.info("Starting scan of {0} on {1}".format(attr_name, dev_name))
+        self.controller.set_status("Scanning from {0} to {1} with step size {2}".format(start_pos, end_pos, step_size))
         scan = FrogController.Scan(self.controller, attr_name, dev_name, start_pos, end_pos, step_size,
                                    "spectrum", "spectrometer")
         d = scan.start_scan()
@@ -400,9 +426,10 @@ class FrogStateScan(FrogState):
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.debug("Check requirements result: {0}".format(result))
         self.controller.scan_result["pos_data"] = result[0]
         self.controller.scan_result["scan_data"] = result[1]
+        self.controller.scan_result["start_time"] = result[2]
         self.next_state = "analyse"
         self.stop_run()
         return "analyse"
@@ -413,6 +440,26 @@ class FrogStateScan(FrogState):
         # If the error was DB_DeviceNotDefined, go to UNKNOWN state and reconnect later
         self.next_state = "unknown"
         self.stop_run()
+
+    def check_message(self, msg):
+        if msg == "pause":
+            self.logger.debug("Message pause... stop.")
+            self.controller.idle_params["paused"] = True
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
+            self.next_state = "idle"
+            self.stop_run()
+        elif msg == "cancel":
+            self.logger.debug("Message cancel... set next state and stop.")
+            self.controller.idle_params["paused"] = True
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
+            self.next_state = "idle"
+            self.stop_run()
+        elif msg == "scan":
+            self.logger.debug("Message resume... continue scan")
+            d = self.deferred_list[0]   # type: defer.Deferred
+            d.cancel()
 
 
 class FrogStateAnalyse(FrogState):
@@ -433,6 +480,7 @@ class FrogStateAnalyse(FrogState):
 
     def state_enter(self, prev_state=None):
         FrogState.state_enter(self, prev_state)
+        self.controller.set_status("Analysing scan")
         self.logger.debug("Starting FROG analysis")
         self.frog_analysis = FrogController.FrogAnalyse(self.controller)
         d = self.frog_analysis.start_analysis()
@@ -478,6 +526,7 @@ class FrogStateUnknown(FrogState):
 
     def state_enter(self, prev_state):
         self.logger.info("Starting state {0}".format(self.name.upper()))
+        self.controller.set_status("Waiting {0} s before trying to reconnect".format(self.wait_time))
         self.start_time = time.time()
         df = defer_later(self.wait_time, self.check_requirements, [None])
         self.deferred_list.append(df)

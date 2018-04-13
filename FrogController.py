@@ -64,6 +64,7 @@ class FrogController(object):
 
         self.idle_params = dict()
         self.idle_params["scan_interval"] = 5.0
+        self.idle_params["paused"] = False
 
         self.scan_params = dict()
         self.scan_params["start_pos"] = 8.6
@@ -71,11 +72,13 @@ class FrogController(object):
         self.scan_params["end_pos"] = 8.75
         self.scan_params["average"] = 1
         self.scan_params["scan_attr"] = "position"
+        self.scan_params["spectrum_frametime"] = 0.1
         # self.scan_params["dev_name"] = "motor"
 
         self.scan_result = dict()
         self.scan_result["pos_data"] = None
         self.scan_result["scan_data"] = None
+        self.scan_result["start_time"] = None
         self.scan_raw_data = None
         self.scan_proc_data = None
         self.scan_roi_data = None
@@ -89,6 +92,7 @@ class FrogController(object):
         self.analysis_result["E_t"] = None
         self.analysis_result["ph_t"] = None
         self.analysis_result["t"] = None
+        self.analysis_result["frog_rec_image"] = None
 
         self.wavelength_vector = None
         self.frog_calc = FrogCalculation.FrogCalculation()
@@ -111,6 +115,8 @@ class FrogController(object):
         self.state_lock = threading.Lock()
         self.status = ""
         self.state = "unknown"
+        self.state_notifier_list = list()       # Methods in this list will be called when the state
+        # or status message is changed
 
         if start is True:
             self.device_factory_dict["spectrometer"] = TangoAttributeFactory(spectrometer_name)
@@ -200,6 +206,8 @@ class FrogController(object):
     def set_state(self, state):
         with self.state_lock:
             self.state = state
+            for m in self.state_notifier_list:
+                m(self.state, self.status)
 
     def get_status(self):
         with self.state_lock:
@@ -207,8 +215,20 @@ class FrogController(object):
         return st
 
     def set_status(self, status_msg):
+        self.logger.debug("Status: {0}".format(status_msg))
         with self.state_lock:
             self.status = status_msg
+            for m in self.state_notifier_list:
+                m(self.state, self.status)
+
+    def add_state_notifier(self, state_notifier_method):
+        self.state_notifier_list.append(state_notifier_method)
+
+    def remove_state_notifier(self, state_notifier_method):
+        try:
+            self.state_notifier_list.remove(state_notifier_method)
+        except ValueError:
+            self.logger.warning("Method {0} not in list. Ignoring.".format(state_notifier_method))
 
     def cond_frog_inv(self):
         I_data = np.fft.fftshift(self.frog_calc.get_reconstructed_intensity(), axes=1)
@@ -243,11 +263,17 @@ class Scan(object):
         self.current_pos = None
         self.pos_data = []
         self.meas_data = []
+        self.scan_start_time = None
+        self.scan_arrive_time = time.time()
+        self.spectrum_time = time.time()
+        self.status_update_time = time.time()
+        self.status_update_interval = 1.0
 
         self.logger = logging.getLogger("FrogController.Scan_{0}_{1}".format(self.scan_attr, self.meas_attr))
         self.logger.setLevel(logging.DEBUG)
 
         self.d = defer.Deferred()
+        self.cancel_flag = False
 
         # Add errback handling!
 
@@ -256,13 +282,19 @@ class Scan(object):
                                                                                      self.start_pos,
                                                                                      self.stop_pos,
                                                                                      self.meas_attr.upper()))
+        self.scan_start_time = time.time()
+        self.spectrum_time = time.time()
+        self.status_update_time = self.scan_start_time
+        self.cancel_flag = False
         scan_pos = self.start_pos
         tol = self.step * 0.1
+
         d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
                                              0.1, 10.0, tolerance=tol, write=True)
         d0.addCallbacks(self.scan_arrive, self.scan_error_cb)
         # d0.addCallback(lambda _: self.controller.read_attribute(self.meas_attr, self.meas_dev))
         # d0.addCallback(self.meas_scan)
+        self.d = defer.Deferred(self.cancel_scan)
 
         return self.d
 
@@ -270,9 +302,8 @@ class Scan(object):
         self.logger.info("Scan step")
         tol = self.step * 0.1
         scan_pos = self.current_pos + self.step
-        if scan_pos > self.stop_pos:
-            self.logger.debug("Scan done!")
-            self.d.callback([self.pos_data, self.meas_data])
+        if scan_pos > self.stop_pos or self.cancel_flag is True:
+            self.scan_done()
             return self.d
 
         d0 = self.controller.check_attribute(self.scan_attr, self.scan_dev, scan_pos,
@@ -290,24 +321,71 @@ class Scan(object):
             return False
 
         self.logger.info("Scan arrive at pos {0}".format(self.current_pos))
-        d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
+        t = time.time()
+        if t - self.status_update_time > self.status_update_interval:
+            status = "Scanning from {0} to {1} with step size {2}\n" \
+                     "Position: {3}".format(self.start_pos, self.stop_pos, self.step, self.current_pos)
+            self.controller.set_status(status)
+            self.status_update_time = t
+
+        # After arriving, check the time against the last read spectrum. Wait for a time so that the next
+        # spectrum frame should be there.
+        self.scan_arrive_time = t
+        try:
+            wait_time = (self.scan_arrive_time - self.spectrum_time) % self.controller.scan_params["spectrum_frametime"]
+        except KeyError:
+            wait_time = 0.1
+        # print("Waittime: {0}".format(wait_time))
+        d0 = defer_later(wait_time, self.meas_read)
+        d0.addErrback(self.scan_error_cb)
+        self.logger.debug("Scheduling read in {0} s".format(wait_time))
+        # d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
         # d0.addCallback(test_cb2)
+        # d0.addCallbacks(self.meas_scan, self.scan_error_cb)
+
+        return True
+
+    def meas_read(self):
+        """
+        Called after scan_arrive to read a new spectrum
+        :return:
+        """
+        self.logger.info("Reading measurement")
+        d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
         d0.addCallbacks(self.meas_scan, self.scan_error_cb)
         return True
 
     def meas_scan(self, result):
-        self.logger.info("Meas scan result: {0}".format(result.value))
+        self.logger.debug("Meas scan result: {0}".format(result.value))
+        if result.time.totime() <= self.scan_arrive_time:
+            self.logger.debug("Old spectrum. Wait for new.")
+            t = time.time() - result.time.totime()
+            if t > 2.0:
+                self.logger.error("Timeout waiting for new spectrum. {0} s elapsed".format(t))
+                self.scan_error_cb(RuntimeError("Timeout waiting for new spectrum"))
+                return False
+            d0 = self.controller.read_attribute(self.meas_attr, self.meas_dev)
+            d0.addCallbacks(self.meas_scan, self.scan_error_cb)
+            return False
+        self.spectrum_time = result.time.totime()
         measure_value = result.value
         # try:
         #     measure_value = result.value
         # except AttributeError:
         #     self.logger.error("Measurement not returning attribute: {0}".format(result))
         #     return False
-        self.logger.info("Measure at scan pos {0} result: {1}".format(self.current_pos, measure_value))
+        self.logger.debug("Measure at scan pos {0} result: {1}".format(self.current_pos, measure_value))
         self.meas_data.append(measure_value)
         self.pos_data.append(self.current_pos)
         self.scan_step()
         return True
+
+    def scan_done(self):
+        self.logger.info("Scan done!")
+        scan_raw_data = np.array(self.meas_data)
+        self.logger.info("Scan dimensions: {0}".format(scan_raw_data.shape))
+        pos_data = np.array(self.pos_data)
+        self.d.callback([pos_data, scan_raw_data, self.scan_start_time])
 
     def scan_error_cb(self, err):
         self.logger.error("Scan error: {0}".format(err))
@@ -317,6 +395,10 @@ class Scan(object):
             pass
         else:
             self.d.errback(err)
+
+    def cancel_scan(self, result):
+        self.logger.info("Cancelling scan, result {0}".format(result))
+        self.cancel_flag = True
 
 
 class FrogAnalyse(object):
@@ -340,7 +422,7 @@ class FrogAnalyse(object):
         self.wavelength_data = None
         self.time_roi_data = None
         self.wavelength_roi_data = None
-        self.frog_intensity_t_l
+        self.frog_rec_image = None
 
         self.logger = logging.getLogger("FrogController.Analysis")
         self.logger.setLevel(logging.DEBUG)
@@ -354,7 +436,7 @@ class FrogAnalyse(object):
         self.find_roi()
         self.convert_data(use_roi=True)
         d = TangoTwisted.defer_to_thread(self.invert_frog_trace)
-        d.addCallback(self.retrieve_data)
+        d.addCallbacks(self.retrieve_data, self.analysis_error)
         self.d = defer.Deferred()
         return self.d
 
@@ -496,7 +578,12 @@ class FrogAnalyse(object):
         self.logger.info("Invert FROG trace")
         method = self.controller.analyse_params["method"]
         iterations = self.controller.analyse_params["iterations"]
-        algo = self.controller.analyse_params["algo"]
+        algo = self.controller.analyse_params["algo"].upper()
+        if algo not in ["SHG", "SD", "PG"]:
+            err_str = "Algorithm {0} not recognized. Should be SHG, SD, or PG.".format(algo)
+            self.logger.error(err_str)
+            e = AttributeError(err_str)
+            self.d.errback(Failure(e))
         self.logger.info("Inverting {0} FROG trace using {1} with {2} iterations.".format(algo,
                                                                                           method,
                                                                                           iterations))
@@ -520,7 +607,7 @@ class FrogAnalyse(object):
         for l in range(I_l_tmp.shape[1]):
             ip = interp1d(t_vect, I_l_tmp[:, l], kind="linear", fill_value=0.0, bounds_error=False)
             I_l_t[:, l] = ip(t_samp)
-        self.frog_intensity_t_l = I_l_t
+        self.frog_rec_image = I_l_t
 
     def retrieve_data(self, result):
         """
@@ -535,14 +622,25 @@ class FrogAnalyse(object):
         E_t = frog_calc.get_trace_abs()
         ph_t = frog_calc.get_trace_phase()
         t = frog_calc.get_t()
+        try:
+            dt = t[1] - t[0]
+        except (TypeError, IndexError):
+            dt = None
+
         self.controller.analysis_result["delta_t"] = delta_t
         self.controller.analysis_result["delta_ph"] = delta_ph
         self.controller.analysis_result["error"] = rec_err
         self.controller.analysis_result["E_t"] = E_t
         self.controller.analysis_result["ph_t"] = ph_t
         self.controller.analysis_result["t"] = t
-        self.controller.analysis_result["frog_intensity_t_l"] = self.frog_intensity_t_l
+        self.controller.analysis_result["dt"] = dt
+        self.cond_frog_inv()
+        self.controller.analysis_result["frog_rec_image"] = self.frog_rec_image
         self.d.callback(self.controller.analysis_result)
+
+    def analysis_error(self, err):
+        self.logger.error("Error in FROG analysis: {0}".format(err))
+        self.d.errback(err)
 
 
 def test_cb(result):
