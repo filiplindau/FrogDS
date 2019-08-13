@@ -63,7 +63,7 @@ class TangoAttributeProtocol(Protocol):
         self._check_lastreadtime = None
         self._check_timeout_deferred = None
 
-        self.logger = logging.getLogger("TangoTwisted.Protocol_{0}_{1}".format(operation.upper(), name))
+        self.logger = logging.getLogger("SpectrometerCameraController.Protocol_{0}_{1}".format(operation.upper(), name))
         self.logger.setLevel(logging.WARNING)
 
     def makeConnection(self, transport=None):
@@ -223,6 +223,7 @@ class TangoAttributeFactory(Factory):
         self.device = None
         self.connected = False
         self.d = None
+        self.proto_list = list()
         self.attribute_dict = dict()
 
         self.logger = logging.getLogger("SpectrometerCameraController.Factory_{0}".format(device_name))
@@ -249,6 +250,7 @@ class TangoAttributeFactory(Factory):
             self.logger.debug("args: {0}, {1}, {2}, kw: {3}".format(operation, name, data, kw))
             proto = self.protocol(operation, name, data, **kw)
             proto.factory = self
+            self.proto_list.append(proto)
             df = proto.makeConnection()
             df.addCallbacks(self.data_received, self.protocol_fail)
             if d is not None:
@@ -328,7 +330,7 @@ class LoopingCall(object):
 
         self.loop_deferred = defer.Deferred()
 
-        self.logger = logging.getLogger("TangoTwisted.LoopingCall")
+        self.logger = logging.getLogger("SpectrometerCameraController.LoopingCall")
         self.logger.setLevel(logging.WARNING)
 
     def start(self, interval, now=True):
@@ -389,7 +391,6 @@ class LoopingCall(object):
             self._schedule_from(self.starttime)
 
     def __call__(self):
-
         def cb(result):
             if self.running:
                 self._schedule_from(time.time())
@@ -405,11 +406,10 @@ class LoopingCall(object):
         def eb(failure):
             self.running = False
             df, self._deferred = self._deferred, None
-            self.logger.error("Looping call error: {0}".format(failure))
             df.errback(failure)
 
         self.call = None
-        self.logger.debug("Looping call")
+        self.logger.debug("Calling function")
         d = defer.maybeDeferred(self.f, *self.args, **self.kw)
         d.addCallback(cb)
         d.addErrback(eb)
@@ -446,6 +446,7 @@ class LoopingCall(object):
             # Finally, if everything else is normal, we just return the
             # computed delay.
             return until_next_interval
+
         self.call = threading.Timer(how_long(), self)
         self.call.start()
 
@@ -873,44 +874,7 @@ def test_cb2(result):
     return result
 
 
-t0 = time.time()
-t1 = time.time()
-count = 0
 
 
-def looping_test(a):
-    t = time.time()
-    global t0
-    global count
-    count += 1
-    dt = t - t0
-    if dt > 1.0:
-        logger.info("Looping test count: {0}, dt: {1}".format(count, dt))
-        t0 = t
-    return count
 
 
-def looping_test_cb(result):
-    logger.info("Callback result: {0}".format(result))
-    return result
-
-    # t = time.time()
-    # global t1
-    # dt = t - t1
-    # if dt > 1.0:
-    #     logger.info("Callback result: {0}, dt: {1}".format(result, dt))
-    #     t1 = t
-
-
-def looping_test_eb(err):
-    logger.error("Callback error: {0}".format(err))
-
-if __name__ == "__main__":
-    t0 = time.time()
-    count = 0
-    lc = LoopingCall(looping_test, count)
-    d = lc.start(0.001)
-    d.addCallback(test_cb2)
-    d.addErrback(looping_test_eb)
-    # lc.loop_deferred.addCallback(looping_test_cb)
-    # lc.loop_deferred.addErrback(looping_test_eb)
