@@ -17,54 +17,33 @@ from FrogControllerSingleShot import FrogController
 from FrogStateSingleShot import FrogStateDispatcher
 
 
-class FrogSingleShotDS(Device):
+class FrogTestDS(Device):
     __metaclass__ = DeviceMeta
 
-    # --- Expert attributes
-    #
-    time_resolution = attribute(label='time resolution',
-                   dtype=float,
-                   access=pt.AttrWriteType.READ,
-                   display_level=pt.DispLevel.EXPERT,
-                   unit="s",
-                   format="%3.2e",
-                   min_value=0.0,
-                   max_value=1.0,
-                   fget="get_dt",
-                   doc="FROG trace time resolution", )
+    im_size = attribute(label='image size',
+                        dtype=int,
+                        access=pt.AttrWriteType.READ_WRITE,
+                        memorized=True,
+                        hw_memorized=True,
+                        unit="pixels",
+                        format="%3d",
+                        min_value=1,
+                        max_value=2048,
+                        fget="get_im_size",
+                        fset="set_im_size",
+                        doc="Image size",)
 
-    # --- Operator attributes
-    #
-    pulsewidth = attribute(label='pulse width',
-                        dtype=float,
-                        access=pt.AttrWriteType.READ,
-                        unit="s",
-                        format="%3.2e",
-                        min_value=0.0,
-                        max_value=1.0,
-                        fget="get_delta_t",
-                        doc="Reconstructed pulse time intensity FWHM",)
-
-    rec_error = attribute(label='reconstruction error',
-                          dtype=float,
-                          access=pt.AttrWriteType.READ,
-                          unit="rel",
-                          format="%3.3f",
-                          min_value=0.0,
-                          max_value=1.0,
-                          fget="get_rec_error",
-                          doc="Relative reconstruction error",)
-
-    timevector = attribute(label='TimeVector',
-                           dtype=(np.double, ),
-                           access=pt.AttrWriteType.READ,
-                           max_dim_x=16384,
-                           display_level=pt.DispLevel.OPERATOR,
-                           unit="m",
-                           format="%5.2e",
-                           fget="get_timevector",
-                           doc="Time vector for FROG trace",
-                           )
+    image = attribute(label='image',
+                      dtype=((np.double, ), ),
+                      access=pt.AttrWriteType.READ,
+                      max_dim_x=2048,
+                      max_dim_y=2048,
+                      display_level=pt.DispLevel.OPERATOR,
+                      unit="a.u.",
+                      format="%5.2f",
+                      fget="get_image",
+                      doc="Latest image",
+                      )
 
     e_field = attribute(label='ElectricField',
                         dtype=(np.double, ),
@@ -76,53 +55,6 @@ class FrogSingleShotDS(Device):
                         fget="get_efield",
                         doc="Reconstructed electric field vs time",
                         )
-
-    phase = attribute(label='Phase',
-                      dtype=(np.double, ),
-                      access=pt.AttrWriteType.READ,
-                      max_dim_x=16384,
-                      display_level=pt.DispLevel.OPERATOR,
-                      unit="rad",
-                      format="%5.2f",
-                      fget="get_phase",
-                      doc="Reconstructed phase vs time",
-                      )
-
-    raw_image = attribute(label='Scan raw image',
-                              dtype=((np.double, ), ),
-                              access=pt.AttrWriteType.READ,
-                              max_dim_x=2048,
-                              max_dim_y=2048,
-                              display_level=pt.DispLevel.OPERATOR,
-                              unit="a.u.",
-                              format="%5.2f",
-                              fget="get_scan_data",
-                              doc="Latest frog trace scan raw data",
-                              )
-
-    frog_in_image = attribute(label='FROG input image',
-                              dtype=((np.double, ), ),
-                              access=pt.AttrWriteType.READ,
-                              max_dim_x=2048,
-                              max_dim_y=2048,
-                              display_level=pt.DispLevel.OPERATOR,
-                              unit="a.u.",
-                              format="%5.2f",
-                              fget="get_frog_in_image",
-                              doc="Latest frog trace conditioned input image",
-                              )
-
-    frog_rec_image = attribute(label='FROG reconstructed image',
-                               dtype=((np.double, ), ),
-                               access=pt.AttrWriteType.READ,
-                               max_dim_x=2048,
-                               max_dim_y=2048,
-                               display_level=pt.DispLevel.OPERATOR,
-                               unit="a.u.",
-                               format="%5.2f",
-                               fget="get_frog_rec_image",
-                               doc="Latest frog trace reconstructed image",
-                               )
 
     camera_name = device_property(dtype=str,
                                   doc="Tango name of the camera device",
@@ -140,15 +72,15 @@ class FrogSingleShotDS(Device):
     camera_central_wavelength = device_property(dtype=float,
                                                 doc="Central wavelength of camera image for the spectral "
                                                     "axis (horizontal) in nm.",
-                                                default_value=388)
+                                                default_value=388.0)
 
     scan_interval = device_property(dtype=np.double,
                                     doc="Time interval between FROG scans in s",
-                                    default_value=10.0)
+                                    default_value=1.0)
 
     scan_average_number = device_property(dtype=int,
                                           doc="Number of images to average to produce a FROG trace",
-                                          default_value=11)
+                                          default_value=1)
 
     analysis_method = device_property(dtype=str,
                                       doc="FROG method to use for analysis. gp or vanilla\n"
@@ -185,46 +117,29 @@ class FrogSingleShotDS(Device):
                                           "Must be an odd number",
                                       default_value=1)
 
-    def __init__(self, klass, name):
-        self.max_value = 1.0
-        self.controller = None              # type: FrogController
-        self.setup_attr_params = dict()
-        self.idle_params = dict()
-        self.scan_params = dict()
-        self.analyse_params = dict()
+    def __init__(self, cl, name):
+        self._im_size = 10
         self.db = None
-        self.frogstate_dispatcher = None    # type: FrogStateDispatcher
-        Device.__init__(self, klass, name)
+        Device.__init__(self, cl, name)
 
     def init_device(self):
-        self.debug_stream("In init_device:")
         Device.init_device(self)
         self.db = pt.Database()
         self.set_state(pt.DevState.UNKNOWN)
         try:
-            if self.frogstate_dispatcher is not None:
-                self.frogstate_dispatcher.stop()
-        except Exception as e:
-            self.error_info("Error stopping state dispatcher: {0}".format(e))
-        try:
-            self.controller = FrogController(self.camera_name)
-            self.controller.add_state_notifier(self.change_state)
-        except Exception as e:
-            self.error_stream("Error creating camera controller: {0}".format(e))
-            return
+            self.frogstate_dispatcher.stop()
+        except AttributeError:
+            pass
 
+        self.controller = FrogController(self.camera_name)
+        self.controller.add_state_notifier(self.change_state)
         self.setup_params()
-
         self.frogstate_dispatcher = FrogStateDispatcher(self.controller)
         self.frogstate_dispatcher.start()
-
-        self.debug_stream("init_device finished")
-        # self.set_state(pt.DevState.ON)
 
     def setup_params(self):
         # Populate parameter dicts from device properties
         self.setup_attr_params = dict()
-        # self.setup_attr_params["wavelengths"] = ("spectrometer", "wavelengthvector", None)
         self.debug_stream("setup_attr_params: {0}".format(self.setup_attr_params))
 
         self.idle_params = dict()
@@ -258,6 +173,32 @@ class FrogSingleShotDS(Device):
         self.controller.scan_params = self.scan_params
         self.controller.analyse_params = self.analyse_params
 
+    def get_image(self):
+        # value = np.random.random((self._im_size, self._im_size))
+        value = self.controller.get_frog_in_image()
+        self.debug_stream("==== GET_IMAGE sum {0}".format(value.sum()))
+        t = self.controller.get_start_time()
+        if value is None:
+            q = pt.AttrQuality.ATTR_INVALID
+        else:
+            q = pt.AttrQuality.ATTR_VALID
+        return value, t, q
+
+    def get_efield(self):
+        value = self.controller.get_e_field()
+        t = self.controller.get_start_time()
+        if value is None:
+            q = pt.AttrQuality.ATTR_INVALID
+        else:
+            q = pt.AttrQuality.ATTR_VALID
+        return value, t, q
+
+    def set_im_size(self, value):
+        self._im_size = value
+
+    def get_im_size(self):
+        return self._im_size
+
     def change_state(self, new_state, new_status=None):
         self.info_stream("Change state: {0}, status {1}".format(new_state, new_status))
         # Map new_state string to tango state
@@ -279,93 +220,6 @@ class FrogSingleShotDS(Device):
         if new_status is not None:
             self.debug_stream("Setting status {0}".format(new_status))
             self.set_status(new_status)
-
-    def get_timevector(self):
-        value = self.controller.get_analysis_result("t")
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_efield(self):
-        value = self.controller.get_analysis_result("e_field")
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_phase(self):
-        value = self.controller.get_analysis_result("ph_t")
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_delta_t(self):
-        value = self.controller.get_analysis_result("delta_t")
-        t = self.controller.get_start_time()
-        self.info_stream("In get_delta_t:value={0}, start time={1}".format(value, t))
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_dt(self):
-        value = self.controller.get_analysis_result("dt")
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_rec_error(self):
-        value = self.controller.get_analysis_result("error")
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_scan_data(self):
-        value = self.controller.get_analysis_result("raw_image")
-        t = self.controller.get_start_time()
-        self.debug_stream("Raw scan data dimension: {0}".format(value.shape))
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_frog_in_image(self):
-        value = self.controller.get_analysis_result("frog_in_image")
-        # value = np.random.random((100, 100))
-        self.debug_stream("FROG_IN_IMAGE {0}".format(value.sum()))
-        # return value
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
-
-    def get_frog_rec_image(self):
-        self.info_stream("Get FROG rec image called")
-        value = self.controller.get_analysis_result("frog_rec_image").astype(np.double)
-        t = self.controller.get_start_time()
-        if value is None:
-            q = pt.AttrQuality.ATTR_INVALID
-        else:
-            q = pt.AttrQuality.ATTR_VALID
-        return value, t, q
 
     @command(doc_in="Pause scanning operations")
     def pause_scanning(self):
@@ -397,4 +251,4 @@ class FrogSingleShotDS(Device):
 
 
 if __name__ == "__main__":
-    pt.server.server_run((FrogSingleShotDS,))
+    pt.server.server_run((FrogTestDS,))

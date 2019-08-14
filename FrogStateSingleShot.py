@@ -204,7 +204,7 @@ class FrogStateDeviceConnect(FrogState):
         self.controller.device_factory_dict = dict()
         self.deferred_list = list()
         # self.logger = logging.getLogger("FrogState.FrogStateDeviceConnect")
-        # self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.DEBUG)
         # self.logger.name = self.name
 
     def state_enter(self, prev_state):
@@ -222,7 +222,7 @@ class FrogStateDeviceConnect(FrogState):
         def_list.addCallbacks(self.check_requirements, self.state_error)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.debug("Check requirements result: {0}".format(result))
         self.next_state = "setup_attributes"
         self.stop_run()
         return "setup_attributes"
@@ -254,6 +254,7 @@ class FrogStateSetupAttributes(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.logger.setLevel(logging.INFO)
         self.deferred_list = list()
 
     def state_enter(self, prev_state=None):
@@ -290,7 +291,7 @@ class FrogStateSetupAttributes(FrogState):
         def_list.addCallbacks(self.check_requirements, self.state_error)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements")
+        self.logger.debug("Check requirements")
         # self.logger.info("Check requirements result: {0}".format(result))
         self.next_state = "scan"
         self.stop_run()
@@ -321,6 +322,7 @@ class FrogStateIdle(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.logger.setLevel(logging.INFO)
         self.t0 = time.time()
 
     def state_enter(self, prev_state=None):
@@ -341,7 +343,7 @@ class FrogStateIdle(FrogState):
         self.deferred_list.append(d)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.debug("Check requirements result: {0}".format(result))
         self.next_state = "scan"
         self.stop_run()
         return "scan"
@@ -461,6 +463,7 @@ class FrogStateAnalyse(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.logger.setLevel(logging.INFO)
         self.frog_analysis = None
 
     def state_enter(self, prev_state=None):
@@ -473,7 +476,7 @@ class FrogStateAnalyse(FrogState):
         d.addCallbacks(self.check_requirements, self.state_error)
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result: {0}".format(result))
+        self.logger.debug("Check requirements result: {0}".format(result))
         self.next_state = "idle"
         self.stop_run()
         return "idle"
@@ -505,6 +508,7 @@ class FrogStateUnknown(FrogState):
 
     def __init__(self, controller):
         FrogState.__init__(self, controller)
+        self.logger.setLevel(logging.INFO)
         self.deferred_list = list()
         self.start_time = None
         self.wait_time = 1.0
@@ -519,7 +523,7 @@ class FrogStateUnknown(FrogState):
         self.running = True
 
     def check_requirements(self, result):
-        self.logger.info("Check requirements result {0} for state {1}".format(result, self.name.upper()))
+        self.logger.debug("Check requirements result {0} for state {1}".format(result, self.name.upper()))
         self.next_state = "device_connect"
         self.stop_run()
 

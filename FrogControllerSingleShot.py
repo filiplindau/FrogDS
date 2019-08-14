@@ -20,6 +20,7 @@ from TangoTwisted import TangoAttributeFactory, TangoAttributeProtocol, \
     LoopingCall, DeferredCondition, ClockReactorless, defer_later
 import FrogStateSingleShot as fs
 import numpy as np
+import copy
 from scipy.signal import medfilt2d
 from scipy.interpolate import interp1d
 
@@ -86,6 +87,11 @@ class FrogController(object):
         self.analysis_result["ph_t"] = None
         self.analysis_result["t"] = None
         self.analysis_result["frog_rec_image"] = None
+        self.analysis_result["frog_in_image"] = None
+        self.analysis_result["frog_in_wavelengths"] = None
+        self.analysis_result["frog_in_t"] = None
+        self.analysis_result["raw_image"] = None
+        self.analysis_result["proc_image"] = None
 
         self.wavelength_vector = None
         self.frog_calc = FrogCalculation.FrogCalculation()
@@ -105,6 +111,7 @@ class FrogController(object):
         self.logger.setLevel(logging.DEBUG)
         self.logger.info("FrogController.__init__")
 
+        self.data_lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.status = ""
         self.state = "unknown"
@@ -212,6 +219,30 @@ class FrogController(object):
             self.status = status_msg
             for m in self.state_notifier_list:
                 m(self.state, self.status)
+
+    def get_start_time(self):
+        with self.state_lock:
+            t = self.scan_result["start_time"]
+            if t is None:
+                t = time.time()
+            if isinstance(t, tango.TimeVal):
+                t = t.totime()
+        return t
+
+    def get_analysis_result(self, key=None):
+        with self.state_lock:
+            if key is None:
+                data = copy.copy(self.analysis_result)
+            else:
+                data = copy.copy(self.analysis_result[key])
+        return data
+
+    def set_analysis_result(self, data, key=None):
+        with self.state_lock:
+            if key is None:
+                self.analysis_result = data
+            else:
+                self.analysis_result[key] = data
 
     def add_state_notifier(self, state_notifier_method):
         self.state_notifier_list.append(state_notifier_method)
@@ -417,25 +448,33 @@ class FrogAnalyse(object):
         self.frog_rec_image = None
 
         self.logger = logging.getLogger("FrogController.Analysis")
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
 
         self.d = defer.Deferred()
 
     def start_analysis(self):
         self.logger.info("Starting up frog analysis")
-        self.load_data()
-        self.preprocess()
-        self.find_roi()
-        self.convert_data(use_roi=True)
-        d = TangoTwisted.defer_to_thread(self.invert_frog_trace)
-        d.addCallbacks(self.retrieve_data, self.analysis_error)
-        self.d = defer.Deferred()
+        res = self.load_data()
+        if res:
+            self.preprocess()
+            self.find_roi()
+            self.convert_data(use_roi=True)
+            d = TangoTwisted.defer_to_thread(self.invert_frog_trace)
+            d.addCallbacks(self.retrieve_data, self.analysis_error)
+        # self.d = defer.Deferred()
         return self.d
 
     def load_data(self):
         self.logger.info("Loading frog data from scan")
-        scan_result = self.controller.scan_result
-        image = scan_result["scan_data"][0] .astype(float)            # First image of the captured frog images
+        if self.controller.scan_result is not None:
+            image = self.controller.scan_result["scan_data"][0].astype(float)  # First image of the captured frog images
+        else:
+            err_s = "No scan result available"
+            self.logger.info(err_s)
+            fail = Failure(AttributeError(err_s))
+            self.d.errback(fail)
+            return False
+        # image = scan_result["scan_data"].astype(float)            # First image of the captured frog images
 
         l0 = self.controller.scan_params["central_wavelength"]
         dl = self.controller.scan_params["spectral_res"]
@@ -446,23 +485,24 @@ class FrogAnalyse(object):
         self.time_data = t
         self.wavelength_data = w
         self.scan_raw_data = image
-        self.controller.ana_data = self.scan_raw_data
-        self.controller.ana_t = t
-        self.controller.ana_w = w
+        # self.controller.ana_data = self.scan_raw_data
+        # self.controller.ana_t = t
+        # self.controller.ana_w = w
         if self.time_data.shape[0] != self.scan_raw_data.shape[0]:
             err_s = "Time vector not matching scan_data dimension: {0} vs {1}".format(self.time_data.shape[0],
                                                                                       self.scan_raw_data.shape[0])
             self.logger.error(err_s)
             fail = Failure(AttributeError(err_s))
             self.d.errback(fail)
-            return
+            return False
         if w.shape[0] != self.scan_raw_data.shape[1]:
             err_s = "Wavelength vector not matching scan_data dimension: {0} vs {1}".format(w.shape[0],
                                                                                             self.scan_raw_data.shape[0])
             self.logger.error(err_s)
             fail = Failure(AttributeError(err_s))
             self.d.errback(fail)
-            return
+            return False
+        return True
 
     def preprocess(self):
         """
@@ -526,11 +566,6 @@ class FrogAnalyse(object):
         self.scan_roi_data = self.scan_proc_data[x0:x1, y0:y1]
         self.time_roi_data = self.time_data[x0:x1]
         self.wavelength_roi_data = self.wavelength_data[y0:y1]
-        self.controller.scan_raw_data = self.scan_raw_data
-        self.controller.scan_proc_data = self.scan_proc_data
-        self.controller.scan_roi_data = self.scan_roi_data
-        self.controller.wavelength_roi_data = self.wavelength_roi_data
-        self.controller.time_roi_data = self.time_roi_data
 
     def convert_data(self, use_roi=False):
         """
@@ -623,15 +658,32 @@ class FrogAnalyse(object):
         except (TypeError, IndexError):
             dt = None
 
-        self.controller.analysis_result["delta_t"] = delta_t
-        self.controller.analysis_result["delta_ph"] = delta_ph
-        self.controller.analysis_result["error"] = rec_err
-        self.controller.analysis_result["E_t"] = E_t
-        self.controller.analysis_result["ph_t"] = ph_t
-        self.controller.analysis_result["t"] = t
-        self.controller.analysis_result["dt"] = dt
         self.cond_frog_inv()
-        self.controller.analysis_result["frog_rec_image"] = self.frog_rec_image
+        self.logger.debug("==== BEGIN RESULT ASSIGN")
+        analysis_result = dict()
+        analysis_result["delta_t"] = delta_t
+        analysis_result["delta_ph"] = delta_ph
+        analysis_result["error"] = rec_err
+        analysis_result["E_t"] = E_t
+        analysis_result["ph_t"] = ph_t
+        analysis_result["t"] = t
+        analysis_result["dt"] = dt
+        analysis_result["frog_rec_image"] = self.frog_rec_image
+        analysis_result["frog_in_image"] = self.scan_roi_data
+        analysis_result["frog_in_wavelengths"] = self.wavelength_roi_data
+        analysis_result["frog_in_t"] = self.time_roi_data
+        analysis_result["raw_image"] = self.scan_raw_data
+        analysis_result["proc_image"] = self.scan_proc_data
+        self.controller.set_analysis_result(analysis_result)
+
+        # self.controller.scan_raw_data = self.scan_raw_data
+        # self.controller.scan_proc_data = self.scan_proc_data
+        # self.controller.scan_roi_data = self.scan_roi_data
+        # self.controller.set_frog_in_image(self.scan_roi_data)
+        # self.controller.wavelength_roi_data = self.wavelength_roi_data
+        # self.controller.time_roi_data = self.time_roi_data
+        self.logger.debug("==== END RESULT ASSIGN")
+
         self.d.callback(self.controller.analysis_result)
 
     def analysis_error(self, err):
